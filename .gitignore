@@ -1,0 +1,49 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments and IDE metadata
+.venv/
+venv/
+env/
+.env
+.env.*
+.idea/
+.vscode/
+
+# Packaging outputs and generated metadata
+build/
+dist/
+*.egg-info/
+
+# Training, experiment, and deployment artifacts
+/outputs/
+/runs/
+/checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.ort
+*.engine
+*.tflite
+*.log
+
+# Local datasets and exported media
+/data/
+/datasets/
+/predictions/
+/benchmarks/
+
+# Notebook and OS files
+.ipynb_checkpoints/
+*.tmp
+*.temp
+Thumbs.db
+.DS_Store

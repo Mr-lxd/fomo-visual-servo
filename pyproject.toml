@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fomo-servo"
+version = "0.0.0"
+description = "PyTorch FOMO visual-servo project"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "PyYAML>=6.0,<7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9.0",
+]
+training = [
+    "numpy>=1.24,<3.0",
+    "opencv-python-headless>=4.8,<5.0",
+]
+export = [
+    "onnx>=1.16,<2.0",
+]
+deployment = [
+    "onnxruntime>=1.17,<2.0",
+    "opencv-python-headless>=4.8,<5.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
