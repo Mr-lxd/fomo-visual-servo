@@ -591,6 +591,7 @@ def _build_data_loaders(
         "merged_class_name": config.dataset.merged_class_name,
         "collision_policy": config.dataset.collision_policy,
         "train_split": config.dataset.train_split,
+        "augmentation_seed": config.training.seed,
     }
     train_dataset = YOLOv5FOMODataset(
         split=config.dataset.train_split,

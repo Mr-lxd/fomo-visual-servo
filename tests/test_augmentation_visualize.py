@@ -4,12 +4,44 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import json
 from pathlib import Path
 
 import cv2
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _write_visualization_config(path: Path) -> Path:
+    """Write a small config for the synthetic fixture contact-sheet smoke test."""
+
+    path.write_text(
+        f"""
+dataset:
+  root: "{(ROOT / 'tests/fixtures/yolo_micro').as_posix()}"
+  train_split: train
+  validation_split: val
+  classes: [fish, crab]
+  class_mode: preserve
+model:
+  input_size: 96
+  output_stride: 8
+training:
+  seed: 42
+augmentation:
+  enabled: true
+  color_jitter:
+    enabled: true
+    probability: 1.0
+    brightness: 0.2
+    contrast: 0.2
+    saturation: 0.2
+    hue: 0.02
+""".lstrip(),
+        encoding="utf-8",
+    )
+    return path
 
 
 def test_visualize_augmentations_writes_fixture_panel(tmp_path: Path) -> None:
@@ -41,3 +73,42 @@ def test_visualize_augmentations_writes_fixture_panel(tmp_path: Path) -> None:
     panel = cv2.imread(str(output_path), cv2.IMREAD_COLOR)
     assert panel is not None
     assert panel.shape == (192, 192, 3)
+
+
+def test_visualize_augmentations_writes_color_contact_sheet_and_json(
+    tmp_path: Path,
+) -> None:
+    """The config-driven mode emits deterministic audit artifacts for fixture images."""
+
+    output_dir = tmp_path / "visualization"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/visualize_augmentations.py",
+            "--config",
+            str(_write_visualization_config(tmp_path / "aug01.yaml")),
+            "--dataset-root",
+            "tests/fixtures/yolo_micro",
+            "--split",
+            "train",
+            "--num-images",
+            "2",
+            "--input-size",
+            "96",
+            "--output-dir",
+            str(output_dir),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    contact_sheet = output_dir / "color_jitter_contact_sheet.jpg"
+    samples_json = output_dir / "color_jitter_samples.json"
+    assert contact_sheet.is_file()
+    assert samples_json.is_file()
+    records = json.loads(samples_json.read_text(encoding="utf-8"))
+    assert len(records) >= 2 * 8
+    assert all("brightness_factor" in record for record in records)

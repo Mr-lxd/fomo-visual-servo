@@ -1,17 +1,12 @@
-"""Visualize the disabled augmentation framework and its downstream outputs.
-
-This command intentionally does not implement any augmentation algorithm.  It
-loads one sample through the same train-only no-op pipeline used by the
-dataset, then renders original boxes, augmentation output, letterbox boxes,
-and the stride heatmap with decoded grid centroids.
-"""
+"""Visualize train-only color jitter and write a deterministic audit contact sheet."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -22,14 +17,16 @@ SOURCE_ROOT = REPOSITORY_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from fomo_servo.config import AugmentationConfig  # noqa: E402
+from fomo_servo.config import AugmentationConfig, ProjectConfig, load_config  # noqa: E402
 from fomo_servo.datasets import (  # noqa: E402
     AbsoluteBox,
-    YOLOv5FOMODataset,
+    ColorJitterFactors,
     FOMOSample,
+    YOLOv5FOMODataset,
+    apply_color_jitter,
     decode_class_index_heatmap,
 )
-from fomo_servo.geometry.letterbox import letterbox_rgb  # noqa: E402
+from fomo_servo.geometry.letterbox import LetterboxTransform, letterbox_rgb  # noqa: E402
 
 
 COLORS = ((0, 255, 0), (0, 128, 255), (255, 0, 255), (255, 255, 0))
@@ -37,16 +34,20 @@ COLORS = ((0, 255, 0), (0, 128, 255), (255, 0, 255), (255, 255, 0))
 
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--dataset-root", type=Path, default=None)
     parser.add_argument("--split", default="train")
     parser.add_argument("--index", type=int, default=0)
-    parser.add_argument("--input-size", type=int, default=192)
-    parser.add_argument("--stride", type=int, default=8)
+    parser.add_argument("--num-images", type=int, default=16)
+    parser.add_argument("--input-size", type=int, default=None)
+    parser.add_argument("--stride", type=int, default=None)
     parser.add_argument(
-        "--class-mode", choices=("merge_single", "preserve"), default="preserve"
+        "--class-mode", choices=("merge_single", "preserve"), default=None
     )
-    parser.add_argument("--merged-class-name", default="creature")
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--merged-class-name", default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--show", action="store_true")
     return parser.parse_args(argv)
 
@@ -80,15 +81,15 @@ def _draw_boxes(
 
 
 def _panel_title(panel: np.ndarray, title: str) -> np.ndarray:
-    """Add a small title to a BGR ``uint8 [S,S,3]`` panel."""
+    """Add a title to a BGR ``uint8 [S,S,3]`` panel."""
 
     cv2.rectangle(panel, (0, 0), (panel.shape[1], 24), (32, 32, 32), -1)
     cv2.putText(
         panel,
-        title,
+        title[:48],
         (6, 17),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
+        0.42,
         (255, 255, 255),
         1,
         cv2.LINE_AA,
@@ -105,17 +106,48 @@ def _display_image_and_boxes(
     """Letterbox a pre-letterbox image for display and transform its boxes."""
 
     display_image, display_transform = letterbox_rgb(image, input_size)
-    display_boxes = []
-    for box in boxes:
-        coordinates = display_transform.forward_box(
-            box.x_min, box.y_min, box.x_max, box.y_max
-        )
-        display_boxes.append(AbsoluteBox(box.foreground_class_id, *coordinates))
+    display_boxes = _transform_boxes(boxes, display_transform)
     return _draw_boxes(display_image, display_boxes, class_names)
 
 
+def _transform_boxes(
+    boxes: Sequence[AbsoluteBox], transform: LetterboxTransform
+) -> tuple[AbsoluteBox, ...]:
+    """Map pixel-space boxes through one letterbox transform."""
+
+    transformed = []
+    for box in boxes:
+        coordinates = transform.forward_box(
+            box.x_min, box.y_min, box.x_max, box.y_max
+        )
+        transformed.append(AbsoluteBox(box.foreground_class_id, *coordinates))
+    return tuple(transformed)
+
+
+def _draw_decoded_centroids(
+    panel: np.ndarray, sample: FOMOSample, stride: int
+) -> np.ndarray:
+    """Draw decoded grid-cell centers on a BGR ``uint8 [S,S,3]`` panel."""
+
+    for decoded in decode_class_index_heatmap(sample.heatmap.class_index):
+        center = (
+            round((decoded.grid_x + 0.5) * stride),
+            round((decoded.grid_y + 0.5) * stride),
+        )
+        color = COLORS[(decoded.class_index - 1) % len(COLORS)]
+        cv2.drawMarker(
+            panel,
+            center,
+            color,
+            markerType=cv2.MARKER_CROSS,
+            markerSize=10,
+            thickness=2,
+        )
+    return panel
+
+
 def _heatmap_panel(sample: FOMOSample, input_size: int, stride: int) -> np.ndarray:
-    """Render ``sample.heatmap.class_index [G,G]`` as BGR ``uint8 [S,S,3]``."""
+    """Render class-index heatmap ``[G,G]`` as BGR ``uint8 [S,S,3]``."""
 
     class_index = sample.heatmap.class_index
     grid_height, grid_width = class_index.shape
@@ -124,17 +156,7 @@ def _heatmap_panel(sample: FOMOSample, input_size: int, stride: int) -> np.ndarr
         if value > 0:
             grid[class_index == value] = COLORS[(int(value) - 1) % len(COLORS)]
     panel = cv2.resize(grid, (input_size, input_size), interpolation=cv2.INTER_NEAREST)
-    for decoded in decode_class_index_heatmap(class_index):
-        center = (round((decoded.grid_x + 0.5) * stride), round((decoded.grid_y + 0.5) * stride))
-        cv2.drawMarker(
-            panel,
-            center,
-            (255, 255, 255),
-            markerType=cv2.MARKER_CROSS,
-            markerSize=10,
-            thickness=2,
-        )
-    return panel
+    return _draw_decoded_centroids(panel, sample, stride)
 
 
 def build_visualization(
@@ -143,15 +165,12 @@ def build_visualization(
     input_size: int,
     stride: int,
 ) -> np.ndarray:
-    """Create BGR ``uint8 [2*S,2*S,3]`` framework diagnostic output."""
+    """Create legacy BGR ``uint8 [2*S,2*S,3]`` diagnostic output."""
 
     panels = (
         _panel_title(
             _display_image_and_boxes(
-                sample.original_image,
-                sample.original_boxes,
-                class_names,
-                input_size,
+                sample.original_image, sample.original_boxes, class_names, input_size
             ),
             "original bbox",
         ),
@@ -162,41 +181,322 @@ def build_visualization(
                 class_names,
                 input_size,
             ),
-            "augmentation output (disabled)",
+            "color jitter output",
         ),
         _panel_title(
             _draw_boxes(sample.letterbox_image, sample.letterbox_boxes, class_names),
             "letterbox bbox",
         ),
-        _panel_title(_heatmap_panel(sample, input_size, stride), "heatmap + decoded centroid"),
+        _panel_title(
+            _heatmap_panel(sample, input_size, stride),
+            "heatmap + decoded centroid",
+        ),
     )
     return cv2.vconcat((cv2.hconcat(panels[:2]), cv2.hconcat(panels[2:])))
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Render one sample without model inference or training."""
+def _render_variant_panel(
+    image: np.ndarray,
+    boxes: Sequence[AbsoluteBox],
+    sample: FOMOSample,
+    class_names: Sequence[str],
+    input_size: int,
+    stride: int,
+    title: str,
+) -> np.ndarray:
+    """Render one RGB variant with its unchanged bbox and centroid heatmap."""
 
-    args = _parse_args(argv)
+    letterboxed, transform = letterbox_rgb(image, input_size)
+    panel = _draw_boxes(
+        letterboxed, _transform_boxes(boxes, transform), class_names
+    )
+    panel = _draw_decoded_centroids(panel, sample, stride)
+    return _panel_title(panel, title)
+
+
+def _factor_text(factors: ColorJitterFactors) -> str:
+    return "b{:.2f} c{:.2f} s{:.2f} h{:+.3f}".format(
+        factors.brightness_factor,
+        factors.contrast_factor,
+        factors.saturation_factor,
+        factors.hue_shift,
+    )
+
+
+def _metadata_record(
+    dataset: YOLOv5FOMODataset,
+    index: int,
+    seed: int,
+    case: str,
+    sample: FOMOSample,
+    *,
+    sampled: bool = True,
+) -> dict[str, Any]:
+    """Convert one sample's color metadata to a JSON-safe record."""
+
+    metadata = sample.augmentation_metadata
+    return {
+        "relative_image_path": dataset.image_paths[index]
+        .relative_to(dataset.root)
+        .as_posix(),
+        "seed": int(seed),
+        "case": case,
+        "sampled": sampled,
+        "applied": bool(metadata.applied),
+        "brightness_factor": float(metadata.brightness_factor),
+        "contrast_factor": float(metadata.contrast_factor),
+        "saturation_factor": float(metadata.saturation_factor),
+        "hue_shift": float(metadata.hue_shift),
+    }
+
+
+def _boundary_factors(config: Any) -> tuple[ColorJitterFactors, ...]:
+    """Return minimum, neutral, maximum factors from YAML parameter magnitudes."""
+
+    color = config.augmentation.color_jitter
+    return (
+        ColorJitterFactors(
+            1.0 - color.brightness,
+            1.0 - color.contrast,
+            1.0 - color.saturation,
+            -color.hue,
+        ),
+        ColorJitterFactors.neutral(),
+        ColorJitterFactors(
+            1.0 + color.brightness,
+            1.0 + color.contrast,
+            1.0 + color.saturation,
+            color.hue,
+        ),
+    )
+
+
+def _metadata_from_factors(factors: ColorJitterFactors) -> Any:
+    from fomo_servo.datasets.augmentation import ColorJitterMetadata
+
+    return ColorJitterMetadata(
+        applied=factors != ColorJitterFactors.neutral(),
+        brightness_factor=factors.brightness_factor,
+        contrast_factor=factors.contrast_factor,
+        saturation_factor=factors.saturation_factor,
+        hue_shift=factors.hue_shift,
+    )
+
+
+def render_contact_sheet(
+    dataset: YOLOv5FOMODataset,
+    config: ProjectConfig,
+    output_dir: Path,
+    *,
+    num_images: int,
+    seed: int,
+) -> tuple[Path, Path]:
+    """Render 16-by-default samples and return contact-sheet/JSON paths."""
+
+    if num_images <= 0:
+        raise ValueError("num_images must be positive")
+    if len(dataset) < num_images:
+        raise ValueError(
+            "requested {} images but split contains only {}".format(
+                num_images, len(dataset)
+            )
+        )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    records = []
+    boundary_names = ("minimum", "neutral", "maximum")
+    for index in range(num_images):
+        image_seed = seed + index * 10
+        variant_samples = [
+            dataset.get_sample(index, np.random.default_rng(image_seed + variant))
+            for variant in range(4)
+        ]
+        reference = variant_samples[0]
+        panels = [
+            _render_variant_panel(
+                reference.original_image,
+                reference.original_boxes,
+                reference,
+                dataset.class_names,
+                dataset.input_size,
+                dataset.stride,
+                "original",
+            )
+        ]
+        records.append(
+            {
+                "relative_image_path": dataset.image_paths[index]
+                .relative_to(dataset.root)
+                .as_posix(),
+                "seed": int(image_seed),
+                "case": "original",
+                "sampled": False,
+                "applied": False,
+                "brightness_factor": 1.0,
+                "contrast_factor": 1.0,
+                "saturation_factor": 1.0,
+                "hue_shift": 0.0,
+            }
+        )
+        for variant, sample in enumerate(variant_samples):
+            metadata = sample.augmentation_metadata
+            factors = ColorJitterFactors(
+                metadata.brightness_factor,
+                metadata.contrast_factor,
+                metadata.saturation_factor,
+                metadata.hue_shift,
+            )
+            panels.append(
+                _render_variant_panel(
+                    sample.augmented_image,
+                    sample.augmented_boxes,
+                    sample,
+                    dataset.class_names,
+                    dataset.input_size,
+                    dataset.stride,
+                    "{} {}".format(
+                        "typical" if variant == 0 else "random{}".format(variant),
+                        _factor_text(factors),
+                    ),
+                )
+            )
+            records.append(
+                _metadata_record(
+                    dataset,
+                    index,
+                    image_seed + variant,
+                    "typical" if variant == 0 else "random{}".format(variant),
+                    sample,
+                )
+            )
+
+        for name, factors in zip(boundary_names, _boundary_factors(config)):
+            boundary_image = apply_color_jitter(reference.original_image, factors)
+            boundary_sample = reference
+            metadata = _metadata_from_factors(factors)
+            panels.append(
+                _render_variant_panel(
+                    boundary_image,
+                    reference.original_boxes,
+                    boundary_sample,
+                    dataset.class_names,
+                    dataset.input_size,
+                    dataset.stride,
+                    "{} {}".format(name, _factor_text(factors)),
+                )
+            )
+            records.append(
+                {
+                    "relative_image_path": dataset.image_paths[index]
+                    .relative_to(dataset.root)
+                    .as_posix(),
+                    "seed": int(image_seed),
+                    "case": name,
+                    "sampled": False,
+                    "applied": bool(metadata.applied),
+                    "brightness_factor": float(metadata.brightness_factor),
+                    "contrast_factor": float(metadata.contrast_factor),
+                    "saturation_factor": float(metadata.saturation_factor),
+                    "hue_shift": float(metadata.hue_shift),
+                }
+            )
+        rows.append(np.hstack(panels))
+
+    contact_sheet = np.vstack(rows)
+    contact_path = output_dir / "color_jitter_contact_sheet.jpg"
+    json_path = output_dir / "color_jitter_samples.json"
+    if not cv2.imwrite(str(contact_path), contact_sheet):
+        raise RuntimeError("unable to write contact sheet: {}".format(contact_path))
+    json_path.write_text(
+        json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return contact_path, json_path
+
+
+def _load_dataset_and_context(
+    args: argparse.Namespace,
+) -> tuple[YOLOv5FOMODataset, Optional[ProjectConfig], int]:
+    """Load config-driven or legacy CLI dataset settings without hard-coded paths."""
+
+    if args.config is not None:
+        config = load_config(args.config)
+        root = args.dataset_root or config.dataset.root
+        input_size = args.input_size or config.model.input_size
+        stride = args.stride or config.model.output_stride
+        class_mode = args.class_mode or config.dataset.class_mode
+        merged_name = args.merged_class_name or config.dataset.merged_class_name
+        seed = config.training.seed if args.seed is None else args.seed
+        dataset = YOLOv5FOMODataset(
+            root,
+            split=args.split,
+            input_size=input_size,
+            stride=stride,
+            class_mode=class_mode,
+            merged_class_name=merged_name,
+            collision_policy=config.dataset.collision_policy,
+            augmentation=config.augmentation,
+            train_split=config.dataset.train_split,
+            augmentation_seed=seed,
+        )
+        return dataset, config, seed
+
+    if args.dataset_root is None:
+        raise ValueError("--dataset-root is required when --config is omitted")
+    input_size = args.input_size or 192
+    stride = args.stride or 8
+    class_mode = args.class_mode or "preserve"
     dataset = YOLOv5FOMODataset(
         args.dataset_root,
         split=args.split,
-        input_size=args.input_size,
-        stride=args.stride,
-        class_mode=args.class_mode,
-        merged_class_name=args.merged_class_name,
+        input_size=input_size,
+        stride=stride,
+        class_mode=class_mode,
+        merged_class_name=args.merged_class_name or "creature",
         augmentation=AugmentationConfig.disabled(),
         train_split="train",
+        augmentation_seed=args.seed or 0,
     )
-    sample = dataset[args.index]
-    visualization = build_visualization(
-        sample, dataset.class_names, args.input_size, args.stride
+    return dataset, None, args.seed or 0
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Render one legacy panel or the config-driven aug01 contact sheet."""
+
+    args = _parse_args(argv)
+    dataset, config, seed = _load_dataset_and_context(args)
+    if args.output is not None:
+        sample = dataset.get_sample(args.index, np.random.default_rng(seed))
+        visualization = build_visualization(
+            sample, dataset.class_names, dataset.input_size, dataset.stride
+        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(args.output), visualization):
+            raise RuntimeError("unable to write visualization: {}".format(args.output))
+        print("Wrote {}".format(args.output))
+        if args.show:
+            cv2.imshow("FOMO color jitter", visualization)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+        return 0
+
+    if config is None:
+        raise ValueError("--config is required for contact-sheet mode")
+    output_dir = args.output_dir or (config.training.output_dir / "visualization")
+    contact_path, json_path = render_contact_sheet(
+        dataset,
+        config,
+        output_dir,
+        num_images=args.num_images,
+        seed=seed,
     )
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(args.output), visualization):
-        raise RuntimeError("unable to write visualization: {}".format(args.output))
-    print("Wrote {}".format(args.output))
+    print("Wrote {}".format(contact_path))
+    print("Wrote {}".format(json_path))
     if args.show:
-        cv2.imshow("FOMO augmentation framework", visualization)
+        contact_sheet = cv2.imread(str(contact_path), cv2.IMREAD_COLOR)
+        if contact_sheet is None:
+            raise RuntimeError("unable to read contact sheet: {}".format(contact_path))
+        cv2.imshow("FOMO color jitter contact sheet", contact_sheet)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
     return 0

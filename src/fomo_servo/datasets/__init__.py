@@ -5,6 +5,9 @@ from .augmentation import (
     AugmentationNotImplementedError,
     AugmentationPipeline,
     AugmentationResult,
+    ColorJitterFactors,
+    ColorJitterMetadata,
+    apply_color_jitter,
 )
 from .heatmap import (
     GridCentroid,
@@ -29,6 +32,8 @@ __all__ = [
     "AugmentationNotImplementedError",
     "AugmentationPipeline",
     "AugmentationResult",
+    "ColorJitterFactors",
+    "ColorJitterMetadata",
     "AbsoluteBox",
     "DatasetError",
     "FOMOSample",
@@ -40,6 +45,7 @@ __all__ = [
     "YOLOv5FOMODataset",
     "YoloLabelError",
     "collate_fomo_samples",
+    "apply_color_jitter",
     "decode_class_index_heatmap",
     "generate_fomo_heatmap",
     "parse_yolo_label_file",

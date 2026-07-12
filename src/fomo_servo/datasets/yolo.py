@@ -10,9 +10,13 @@ from typing import Any, Mapping, Optional, Sequence, Tuple, Union
 import cv2
 import numpy as np
 import yaml
+from torch.utils.data import get_worker_info
 
 from fomo_servo.config import AugmentationConfig
-from fomo_servo.datasets.augmentation import AugmentationPipeline
+from fomo_servo.datasets.augmentation import (
+    AugmentationPipeline,
+    ColorJitterMetadata,
+)
 from fomo_servo.datasets.heatmap import HeatmapTarget, generate_fomo_heatmap
 from fomo_servo.geometry.letterbox import LetterboxTransform, letterbox_rgb
 
@@ -74,6 +78,7 @@ class FOMOSample:
     letterbox_boxes: Tuple[AbsoluteBox, ...]
     transform: LetterboxTransform
     heatmap: HeatmapTarget
+    augmentation_metadata: ColorJitterMetadata
     image_path: Path
     label_path: Path
 
@@ -102,6 +107,7 @@ class YOLOv5FOMODataset:
         collision_policy: str = "error",
         augmentation: Optional[AugmentationConfig] = None,
         train_split: str = "train",
+        augmentation_seed: int = 0,
     ) -> None:
         self.root = Path(root)
         if class_mode not in self.CLASS_MODES:
@@ -122,6 +128,12 @@ class YOLOv5FOMODataset:
             raise DatasetError("augmentation must be an AugmentationConfig or None")
         if not isinstance(train_split, str) or not train_split.strip():
             raise DatasetError("train_split must be a non-empty string")
+        if (
+            isinstance(augmentation_seed, bool)
+            or not isinstance(augmentation_seed, int)
+            or augmentation_seed < 0
+        ):
+            raise DatasetError("augmentation_seed must be a non-negative integer")
 
         self.split = split
         self.input_size = input_size
@@ -132,6 +144,7 @@ class YOLOv5FOMODataset:
             AugmentationConfig.disabled() if augmentation is None else augmentation
         )
         self.train_split = train_split
+        self.augmentation_seed = augmentation_seed
         self.is_train = split == train_split and split.lower() not in {
             "val",
             "valid",
@@ -176,7 +189,21 @@ class YOLOv5FOMODataset:
         return len(self.image_paths)
 
     def __getitem__(self, index: int) -> FOMOSample:
-        """Load one image and produce normalized image, boxes, metadata, and labels."""
+        """Load one image with its deterministic worker-scoped augmentation RNG."""
+
+        return self.get_sample(index)
+
+    def get_sample(
+        self,
+        index: int,
+        rng: Optional[np.random.Generator] = None,
+    ) -> FOMOSample:
+        """Load one sample, optionally using an explicit augmentation RNG.
+
+        ``image`` is normalized RGB ``float32 [3,S,S]`` and heatmap class indices
+        are ``int64 [S/stride,S/stride]``. If ``rng`` is omitted, its seed combines
+        the configured augmentation seed, DataLoader worker seed, and sample index.
+        """
 
         image_path = self.image_paths[index]
         label_path = self.labels_dir / "{}.txt".format(image_path.stem)
@@ -201,10 +228,7 @@ class YOLOv5FOMODataset:
         augmentation_result = self.augmentation_pipeline.apply(
             original_image,
             tuple(original_boxes),
-            # ``set_random_seed`` and ``worker_init_fn`` seed this NumPy module;
-            # disabled augmentation never consumes it, while future operations
-            # can use the same worker-scoped RNG without changing dataset APIs.
-            np.random,
+            self._sample_rng(index) if rng is None else rng,
         )
         augmented_image = augmentation_result.image
         augmented_boxes = tuple(augmentation_result.boxes)
@@ -252,9 +276,20 @@ class YOLOv5FOMODataset:
             letterbox_boxes=tuple(letterbox_boxes),
             transform=transform,
             heatmap=heatmap,
+            augmentation_metadata=augmentation_result.metadata,
             image_path=image_path,
             label_path=label_path,
         )
+
+    def _sample_rng(self, index: int) -> np.random.Generator:
+        """Create a local generator from configured and DataLoader worker seeds."""
+
+        worker_info = get_worker_info()
+        worker_seed = (
+            int(worker_info.seed) if worker_info is not None else self.augmentation_seed
+        )
+        seed = (worker_seed + self.augmentation_seed + int(index)) % (2**63 - 1)
+        return np.random.default_rng(seed)
 
     def _map_class_id(self, source_class_id: int) -> int:
         if self.class_mode == "merge_single":
