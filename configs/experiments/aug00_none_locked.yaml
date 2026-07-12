@@ -43,6 +43,28 @@ model:
   input_size: 192
   output_stride: 8
 
+augmentation:
+  enabled: false
+  color_jitter:
+    enabled: false
+    probability: 0.0
+    brightness: 0.0
+    contrast: 0.0
+    saturation: 0.0
+    hue: 0.0
+  horizontal_flip:
+    enabled: false
+    probability: 0.0
+  gaussian_blur:
+    enabled: false
+    probability: 0.0
+  gaussian_noise:
+    enabled: false
+    probability: 0.0
+  affine:
+    enabled: false
+    probability: 0.0
+
 loss:
   name: focal_cross_entropy
   gamma: 2.0

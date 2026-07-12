@@ -1,6 +1,11 @@
 """YOLOv5 dataset loading and FOMO heatmap target generation."""
 
 from .collate import FOMOBatch, collate_fomo_samples
+from .augmentation import (
+    AugmentationNotImplementedError,
+    AugmentationPipeline,
+    AugmentationResult,
+)
 from .heatmap import (
     GridCentroid,
     HeatmapCollisionError,
@@ -21,6 +26,9 @@ from .yolo import (
 
 __all__ = [
     "FOMOBatch",
+    "AugmentationNotImplementedError",
+    "AugmentationPipeline",
+    "AugmentationResult",
     "AbsoluteBox",
     "DatasetError",
     "FOMOSample",

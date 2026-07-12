@@ -5,12 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
-from typing import Any, Mapping, Sequence, Tuple, Union
+from typing import Any, Mapping, Optional, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
 import yaml
 
+from fomo_servo.config import AugmentationConfig
+from fomo_servo.datasets.augmentation import AugmentationPipeline
 from fomo_servo.datasets.heatmap import HeatmapTarget, generate_fomo_heatmap
 from fomo_servo.geometry.letterbox import LetterboxTransform, letterbox_rgb
 
@@ -56,14 +58,19 @@ class FOMOSample:
     """One FOMO data sample without a batch dimension.
 
     ``image`` is normalized RGB ``float32 [3,S,S]``. ``original_image`` and
-    ``letterbox_image`` are RGB ``uint8 [H,W,3]`` and ``uint8 [S,S,3]``.
-    Heatmap shapes are documented by ``HeatmapTarget``.
+    ``augmented_image`` are RGB ``uint8 [H,W,3]`` before letterbox; in the
+    locked no-op phase they are elementwise identical. ``letterbox_image`` is
+    RGB ``uint8 [S,S,3]``. ``original_boxes`` are pre-augmentation boxes and
+    ``augmented_boxes`` are the boxes passed to letterbox. Heatmap shapes are
+    documented by ``HeatmapTarget``.
     """
 
     image: np.ndarray
     original_image: np.ndarray
+    augmented_image: np.ndarray
     letterbox_image: np.ndarray
     original_boxes: Tuple[AbsoluteBox, ...]
+    augmented_boxes: Tuple[AbsoluteBox, ...]
     letterbox_boxes: Tuple[AbsoluteBox, ...]
     transform: LetterboxTransform
     heatmap: HeatmapTarget
@@ -93,6 +100,8 @@ class YOLOv5FOMODataset:
         class_mode: str,
         merged_class_name: str = "creature",
         collision_policy: str = "error",
+        augmentation: Optional[AugmentationConfig] = None,
+        train_split: str = "train",
     ) -> None:
         self.root = Path(root)
         if class_mode not in self.CLASS_MODES:
@@ -109,12 +118,29 @@ class YOLOv5FOMODataset:
             raise DatasetError(
                 "collision_policy must be 'error' or 'keep_first'"
             )
+        if augmentation is not None and not isinstance(augmentation, AugmentationConfig):
+            raise DatasetError("augmentation must be an AugmentationConfig or None")
+        if not isinstance(train_split, str) or not train_split.strip():
+            raise DatasetError("train_split must be a non-empty string")
 
         self.split = split
         self.input_size = input_size
         self.stride = stride
         self.class_mode = class_mode
         self.collision_policy = collision_policy
+        self.augmentation = (
+            AugmentationConfig.disabled() if augmentation is None else augmentation
+        )
+        self.train_split = train_split
+        self.is_train = split == train_split and split.lower() not in {
+            "val",
+            "valid",
+            "validation",
+            "test",
+        }
+        self.augmentation_pipeline = AugmentationPipeline(
+            self.augmentation, is_train=self.is_train
+        )
         self.source_class_names = _load_yolo_class_names(self.root / "data.yaml")
         if class_mode == "merge_single":
             self.class_names = (merged_class_name,)
@@ -160,49 +186,51 @@ class YOLOv5FOMODataset:
             label_path, num_source_classes=len(self.source_class_names)
         )
 
-        letterbox_image, transform = letterbox_rgb(original_image, self.input_size)
         original_boxes = []
-        letterbox_boxes = []
-        centroids = []
         for source_box in source_boxes:
             foreground_class_id = self._map_class_id(source_box.source_class_id)
-            original_box = _normalized_to_absolute(
-                source_box,
-                original_width,
-                original_height,
-                foreground_class_id,
+            original_boxes.append(
+                _normalized_to_absolute(
+                    source_box,
+                    original_width,
+                    original_height,
+                    foreground_class_id,
+                )
+            )
+
+        augmentation_result = self.augmentation_pipeline.apply(
+            original_image,
+            tuple(original_boxes),
+            # ``set_random_seed`` and ``worker_init_fn`` seed this NumPy module;
+            # disabled augmentation never consumes it, while future operations
+            # can use the same worker-scoped RNG without changing dataset APIs.
+            np.random,
+        )
+        augmented_image = augmentation_result.image
+        augmented_boxes = tuple(augmentation_result.boxes)
+
+        letterbox_image, transform = letterbox_rgb(augmented_image, self.input_size)
+        letterbox_boxes = []
+        centroids = []
+        for original_box in augmented_boxes:
+            letterbox_coordinates = transform.forward_box(
+                original_box.x_min,
+                original_box.y_min,
+                original_box.x_max,
+                original_box.y_max,
             )
             letterbox_box = AbsoluteBox(
-                foreground_class_id=foreground_class_id,
-                x_min=transform.forward_box(
-                    original_box.x_min,
-                    original_box.y_min,
-                    original_box.x_max,
-                    original_box.y_max,
-                )[0],
-                y_min=transform.forward_box(
-                    original_box.x_min,
-                    original_box.y_min,
-                    original_box.x_max,
-                    original_box.y_max,
-                )[1],
-                x_max=transform.forward_box(
-                    original_box.x_min,
-                    original_box.y_min,
-                    original_box.x_max,
-                    original_box.y_max,
-                )[2],
-                y_max=transform.forward_box(
-                    original_box.x_min,
-                    original_box.y_min,
-                    original_box.x_max,
-                    original_box.y_max,
-                )[3],
+                foreground_class_id=original_box.foreground_class_id,
+                x_min=letterbox_coordinates[0],
+                y_min=letterbox_coordinates[1],
+                x_max=letterbox_coordinates[2],
+                y_max=letterbox_coordinates[3],
             )
-            original_boxes.append(original_box)
             letterbox_boxes.append(letterbox_box)
             centroid_x, centroid_y = transform.forward_point(*original_box.center)
-            centroids.append((centroid_x, centroid_y, foreground_class_id))
+            centroids.append(
+                (centroid_x, centroid_y, original_box.foreground_class_id)
+            )
 
         heatmap = generate_fomo_heatmap(
             centroids=centroids,
@@ -217,8 +245,10 @@ class YOLOv5FOMODataset:
         return FOMOSample(
             image=normalized_image,
             original_image=original_image,
+            augmented_image=augmented_image,
             letterbox_image=letterbox_image,
             original_boxes=tuple(original_boxes),
+            augmented_boxes=augmented_boxes,
             letterbox_boxes=tuple(letterbox_boxes),
             transform=transform,
             heatmap=heatmap,

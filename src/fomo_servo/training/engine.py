@@ -590,12 +590,17 @@ def _build_data_loaders(
         "class_mode": config.dataset.class_mode,
         "merged_class_name": config.dataset.merged_class_name,
         "collision_policy": config.dataset.collision_policy,
+        "train_split": config.dataset.train_split,
     }
     train_dataset = YOLOv5FOMODataset(
-        split=config.dataset.train_split, **common_arguments
+        split=config.dataset.train_split,
+        augmentation=config.augmentation,
+        **common_arguments,
     )
     validation_dataset = YOLOv5FOMODataset(
-        split=config.dataset.validation_split, **common_arguments
+        split=config.dataset.validation_split,
+        augmentation=config.augmentation,
+        **common_arguments,
     )
     if train_dataset.class_names != config.dataset.class_names:
         raise TrainingError(

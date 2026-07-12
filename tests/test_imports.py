@@ -9,6 +9,7 @@ PACKAGE_MODULES = (
     "fomo_servo",
     "fomo_servo.config",
     "fomo_servo.datasets",
+    "fomo_servo.datasets.augmentation",
     "fomo_servo.models",
     "fomo_servo.training",
     "fomo_servo.losses",

@@ -108,6 +108,50 @@ class SchedulerConfig:
 
 
 @dataclass(frozen=True)
+class AugmentationProbabilityConfig:
+    """Configuration shared by a future augmentation with one probability."""
+
+    enabled: bool = False
+    probability: float = 0.0
+
+
+@dataclass(frozen=True)
+class ColorJitterConfig(AugmentationProbabilityConfig):
+    """Future color-jitter parameters; algorithm intentionally disabled in this phase."""
+
+    brightness: float = 0.0
+    contrast: float = 0.0
+    saturation: float = 0.0
+    hue: float = 0.0
+
+
+@dataclass(frozen=True)
+class AugmentationConfig:
+    """Train-only augmentation schema with all operations disabled in aug00."""
+
+    enabled: bool = False
+    color_jitter: ColorJitterConfig = field(default_factory=ColorJitterConfig)
+    horizontal_flip: AugmentationProbabilityConfig = field(
+        default_factory=AugmentationProbabilityConfig
+    )
+    gaussian_blur: AugmentationProbabilityConfig = field(
+        default_factory=AugmentationProbabilityConfig
+    )
+    gaussian_noise: AugmentationProbabilityConfig = field(
+        default_factory=AugmentationProbabilityConfig
+    )
+    affine: AugmentationProbabilityConfig = field(
+        default_factory=AugmentationProbabilityConfig
+    )
+
+    @classmethod
+    def disabled(cls) -> "AugmentationConfig":
+        """Return the canonical all-disabled configuration for non-training callers."""
+
+        return cls()
+
+
+@dataclass(frozen=True)
 class PostprocessConfig:
     """YAML-controlled logits postprocessing and target-selection settings."""
 
@@ -176,6 +220,7 @@ class ProjectConfig:
     model: ModelConfig
     loss: LossConfig
     training: TrainingConfig
+    augmentation: AugmentationConfig
     postprocess: PostprocessConfig
     evaluation: EvaluationConfig
     source_path: Path
@@ -273,6 +318,10 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     )
     head_channels = _optional_positive_integer(
         model_mapping, "head_channels", 32, "model"
+    )
+
+    augmentation = _parse_augmentation_config(
+        _optional_mapping(payload, "augmentation")
     )
 
     loss_mapping = _optional_mapping(payload, "loss")
@@ -539,6 +588,7 @@ def load_config(path: ConfigPath) -> ProjectConfig:
                 gamma=scheduler_gamma,
             ),
         ),
+        augmentation=augmentation,
         postprocess=PostprocessConfig(
             inference_threshold=inference_threshold,
             confidence_threshold=legacy_confidence_threshold,
@@ -564,6 +614,59 @@ def load_config(path: ConfigPath) -> ProjectConfig:
         experiment=ExperimentConfig(
             name=experiment_name,
             summary_csv=experiment_summary_csv,
+        ),
+    )
+
+
+def _parse_augmentation_config(
+    payload: Mapping[str, Any]
+) -> AugmentationConfig:
+    """Parse the complete disabled-by-default augmentation schema."""
+
+    enabled = _optional_boolean(payload, "enabled", False, "augmentation")
+    color_mapping = _optional_mapping(payload, "color_jitter")
+    color_jitter = ColorJitterConfig(
+        enabled=_optional_boolean(
+            color_mapping, "enabled", False, "augmentation.color_jitter"
+        ),
+        probability=_optional_probability(
+            color_mapping, "probability", 0.0, "augmentation.color_jitter"
+        ),
+        brightness=_optional_nonnegative_float(
+            color_mapping, "brightness", 0.0, "augmentation.color_jitter"
+        ),
+        contrast=_optional_nonnegative_float(
+            color_mapping, "contrast", 0.0, "augmentation.color_jitter"
+        ),
+        saturation=_optional_nonnegative_float(
+            color_mapping, "saturation", 0.0, "augmentation.color_jitter"
+        ),
+        hue=_optional_nonnegative_float(
+            color_mapping, "hue", 0.0, "augmentation.color_jitter"
+        ),
+    )
+    return AugmentationConfig(
+        enabled=enabled,
+        color_jitter=color_jitter,
+        horizontal_flip=_parse_augmentation_probability(
+            payload, "horizontal_flip"
+        ),
+        gaussian_blur=_parse_augmentation_probability(payload, "gaussian_blur"),
+        gaussian_noise=_parse_augmentation_probability(payload, "gaussian_noise"),
+        affine=_parse_augmentation_probability(payload, "affine"),
+    )
+
+
+def _parse_augmentation_probability(
+    payload: Mapping[str, Any], name: str
+) -> AugmentationProbabilityConfig:
+    """Parse one future augmentation operation's enabled/probability fields."""
+
+    mapping = _optional_mapping(payload, name)
+    return AugmentationProbabilityConfig(
+        enabled=_optional_boolean(mapping, "enabled", False, "augmentation." + name),
+        probability=_optional_probability(
+            mapping, "probability", 0.0, "augmentation." + name
         ),
     )
 
