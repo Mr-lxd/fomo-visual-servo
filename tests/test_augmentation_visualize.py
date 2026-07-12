@@ -87,6 +87,34 @@ augmentation:
     return path
 
 
+def _write_suite_visualization_config(path: Path) -> Path:
+    """Write a compact underwater preset config for the suite smoke test."""
+
+    path.write_text(
+        f"""
+dataset:
+  root: "{(ROOT / 'tests/fixtures/yolo_micro').as_posix()}"
+  train_split: train
+  validation_split: val
+  classes: [fish, crab]
+  class_mode: preserve
+model:
+  input_size: 96
+  output_stride: 8
+training:
+  seed: 42
+augmentation:
+  enabled: true
+  preset: underwater_conservative
+  overrides: {{}}
+experiment:
+  name: augmentation_suite
+""".lstrip(),
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_visualize_augmentations_writes_fixture_panel(tmp_path: Path) -> None:
     """The future visualization entry point must consume no-op dataset outputs."""
 
@@ -198,3 +226,43 @@ def test_visualize_augmentations_writes_hflip_contact_sheet_and_geometry_json(
     assert all(record["horizontal_flip_applied"] for record in forced)
     assert all("original_boxes" in record for record in records)
     assert all("flipped_centroids" in record for record in records)
+
+
+def test_visualize_augmentations_writes_full_suite_outputs(tmp_path: Path) -> None:
+    """The suite mode emits epoch, preset, affine and metadata artifacts."""
+
+    output_dir = tmp_path / "suite_visualization"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/visualize_augmentations.py",
+            "--config",
+            str(_write_suite_visualization_config(tmp_path / "suite.yaml")),
+            "--split",
+            "train",
+            "--num-images",
+            "2",
+            "--output-dir",
+            str(output_dir),
+            "--suite",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    expected = (
+        "rng_across_epochs_contact_sheet.jpg",
+        "photometric_preset_contact_sheet.jpg",
+        "underwater_conservative_contact_sheet.jpg",
+        "affine_geometry_contact_sheet.jpg",
+        "augmentation_samples.json",
+    )
+    assert all((output_dir / name).is_file() for name in expected)
+    records = json.loads((output_dir / "augmentation_samples.json").read_text(encoding="utf-8"))
+    assert len(records) == 2 * 6
+    assert all(not Path(record["relative_image_path"]).is_absolute() for record in records)
+    assert all("sample_seed" in record for record in records)
+    assert all("dropped_bbox_count" in record for record in records)

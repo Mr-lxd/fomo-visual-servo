@@ -2,6 +2,7 @@
 
 from .collate import FOMOBatch, collate_fomo_samples
 from .augmentation import (
+    AugmentationMetadata,
     AugmentationNotImplementedError,
     AugmentationPipeline,
     AugmentationResult,
@@ -10,6 +11,7 @@ from .augmentation import (
     apply_color_jitter,
     flip_boxes_horizontally,
 )
+from .rng import make_sample_rng, stable_sample_seed
 from .heatmap import (
     GridCentroid,
     HeatmapCollisionError,
@@ -31,6 +33,7 @@ from .yolo import (
 __all__ = [
     "FOMOBatch",
     "AugmentationNotImplementedError",
+    "AugmentationMetadata",
     "AugmentationPipeline",
     "AugmentationResult",
     "ColorJitterFactors",
@@ -51,4 +54,6 @@ __all__ = [
     "decode_class_index_heatmap",
     "generate_fomo_heatmap",
     "parse_yolo_label_file",
+    "make_sample_rng",
+    "stable_sample_seed",
 ]

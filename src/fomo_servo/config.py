@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from math import isfinite
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Tuple, Union
@@ -109,7 +109,7 @@ class SchedulerConfig:
 
 @dataclass(frozen=True)
 class AugmentationProbabilityConfig:
-    """Configuration shared by a future augmentation with one probability."""
+    """Configuration shared by one train-only augmentation with one probability."""
 
     enabled: bool = False
     probability: float = 0.0
@@ -117,7 +117,7 @@ class AugmentationProbabilityConfig:
 
 @dataclass(frozen=True)
 class ColorJitterConfig(AugmentationProbabilityConfig):
-    """Future color-jitter parameters; algorithm intentionally disabled in this phase."""
+    """RGB color-jitter parameters."""
 
     brightness: float = 0.0
     contrast: float = 0.0
@@ -126,22 +126,53 @@ class ColorJitterConfig(AugmentationProbabilityConfig):
 
 
 @dataclass(frozen=True)
+class GaussianBlurConfig(AugmentationProbabilityConfig):
+    """Gaussian blur parameters sampled on uint8 RGB images."""
+
+    kernel_sizes: Tuple[int, ...] = (3, 5)
+    sigma_min: float = 0.1
+    sigma_max: float = 1.0
+
+
+@dataclass(frozen=True)
+class GaussianNoiseConfig(AugmentationProbabilityConfig):
+    """Gaussian noise parameters in uint8 pixel units."""
+
+    std_min: float = 2.0
+    std_max: float = 8.0
+
+
+@dataclass(frozen=True)
+class AffineConfig(AugmentationProbabilityConfig):
+    """Mild image/bbox affine transform parameters."""
+
+    scale_min: float = 0.90
+    scale_max: float = 1.10
+    translate_fraction: float = 0.05
+    rotation_degrees: float = 5.0
+    min_visibility: float = 0.25
+    border_value: int = 114
+
+
+@dataclass(frozen=True)
 class AugmentationConfig:
-    """Train-only augmentation schema with all operations disabled in aug00."""
+    """Train-only online augmentation schema with optional preset expansion."""
 
     enabled: bool = False
+    preset: Optional[str] = None
+    overrides: Mapping[str, Any] = field(default_factory=dict)
     color_jitter: ColorJitterConfig = field(default_factory=ColorJitterConfig)
     horizontal_flip: AugmentationProbabilityConfig = field(
         default_factory=AugmentationProbabilityConfig
     )
-    gaussian_blur: AugmentationProbabilityConfig = field(
-        default_factory=AugmentationProbabilityConfig
+    gaussian_blur: GaussianBlurConfig = field(
+        default_factory=GaussianBlurConfig
     )
-    gaussian_noise: AugmentationProbabilityConfig = field(
-        default_factory=AugmentationProbabilityConfig
+    gaussian_noise: GaussianNoiseConfig = field(
+        default_factory=GaussianNoiseConfig
     )
-    affine: AugmentationProbabilityConfig = field(
-        default_factory=AugmentationProbabilityConfig
+    affine: AffineConfig = field(
+        default_factory=AffineConfig
     )
 
     @classmethod
@@ -237,6 +268,22 @@ class ProjectConfig:
         """Return background plus the configured foreground class count."""
 
         return 1 + len(self.dataset.class_names)
+
+
+def resolved_augmentation_dict(config: AugmentationConfig) -> dict[str, Any]:
+    """Return a JSON-safe fully expanded augmentation mapping."""
+
+    if not isinstance(config, AugmentationConfig):
+        raise TypeError("config must be an AugmentationConfig instance")
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(key): normalize(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [normalize(item) for item in value]
+        return value
+
+    return normalize(asdict(config))
 
 
 def load_config(path: ConfigPath) -> ProjectConfig:
@@ -621,39 +668,147 @@ def load_config(path: ConfigPath) -> ProjectConfig:
 def _parse_augmentation_config(
     payload: Mapping[str, Any]
 ) -> AugmentationConfig:
-    """Parse the complete disabled-by-default augmentation schema."""
+    """Parse legacy inline fields or a fully expanded augmentation preset."""
 
-    enabled = _optional_boolean(payload, "enabled", False, "augmentation")
-    color_mapping = _optional_mapping(payload, "color_jitter")
-    color_jitter = ColorJitterConfig(
-        enabled=_optional_boolean(
-            color_mapping, "enabled", False, "augmentation.color_jitter"
-        ),
-        probability=_optional_probability(
-            color_mapping, "probability", 0.0, "augmentation.color_jitter"
-        ),
-        brightness=_optional_nonnegative_float(
-            color_mapping, "brightness", 0.0, "augmentation.color_jitter"
-        ),
-        contrast=_optional_nonnegative_float(
-            color_mapping, "contrast", 0.0, "augmentation.color_jitter"
-        ),
-        saturation=_optional_nonnegative_float(
-            color_mapping, "saturation", 0.0, "augmentation.color_jitter"
-        ),
-        hue=_optional_nonnegative_float(
-            color_mapping, "hue", 0.0, "augmentation.color_jitter"
-        ),
+    from fomo_servo.datasets.presets import (
+        KNOWN_AUGMENTATION_FIELDS,
+        known_operation_fields,
+        resolve_preset_mapping,
     )
+
+    if any(not isinstance(key, str) for key in payload):
+        raise ConfigurationError("augmentation keys must be strings")
+    unknown = sorted(set(payload).difference(KNOWN_AUGMENTATION_FIELDS))
+    if unknown:
+        raise ConfigurationError(
+            "unknown augmentation field(s): {}".format(", ".join(unknown))
+        )
+    enabled = _optional_boolean(payload, "enabled", False, "augmentation")
+    has_preset = "preset" in payload
+    preset = payload.get("preset")
+    overrides = payload.get("overrides", {})
+    if not isinstance(overrides, Mapping):
+        raise ConfigurationError("augmentation.overrides must be a mapping")
+    if has_preset and (not isinstance(preset, str) or not preset.strip()):
+        raise ConfigurationError("augmentation.preset must be a non-empty string")
+    if not has_preset:
+        preset = None
+        if payload:
+            warnings.warn(
+                "inline augmentation fields are deprecated; use augmentation.preset and overrides",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+        resolved: dict[str, Any] = {
+            "color_jitter": {},
+            "horizontal_flip": {},
+            "gaussian_blur": {},
+            "gaussian_noise": {},
+            "affine": {},
+        }
+    else:
+        try:
+            resolved = resolve_preset_mapping(str(preset), overrides)
+        except ValueError as error:
+            raise ConfigurationError(str(error)) from error
+
+    for operation in (
+        "color_jitter",
+        "horizontal_flip",
+        "gaussian_blur",
+        "gaussian_noise",
+        "affine",
+    ):
+        if operation not in payload:
+            continue
+        mapping = _optional_mapping(payload, operation)
+        operation_fields = known_operation_fields(operation)
+        if any(not isinstance(key, str) for key in mapping):
+            raise ConfigurationError("augmentation.{} keys must be strings".format(operation))
+        unknown_fields = sorted(set(mapping).difference(operation_fields))
+        if unknown_fields:
+            raise ConfigurationError(
+                "unknown augmentation.{} field(s): {}".format(
+                    operation, ", ".join(unknown_fields)
+                )
+            )
+        resolved.setdefault(operation, {}).update(mapping)
+
+    color_mapping = _optional_mapping(resolved, "color_jitter")
+    color_jitter = ColorJitterConfig(
+        enabled=_optional_boolean(color_mapping, "enabled", False, "augmentation.color_jitter"),
+        probability=_optional_probability(color_mapping, "probability", 0.0, "augmentation.color_jitter"),
+        brightness=_optional_nonnegative_float(color_mapping, "brightness", 0.0, "augmentation.color_jitter"),
+        contrast=_optional_nonnegative_float(color_mapping, "contrast", 0.0, "augmentation.color_jitter"),
+        saturation=_optional_nonnegative_float(color_mapping, "saturation", 0.0, "augmentation.color_jitter"),
+        hue=_optional_nonnegative_float(color_mapping, "hue", 0.0, "augmentation.color_jitter"),
+    )
+    blur_mapping = _optional_mapping(resolved, "gaussian_blur")
+    kernel_sizes = _optional_integer_sequence(
+        blur_mapping, "kernel_sizes", (3, 5), "augmentation.gaussian_blur"
+    )
+    if any(value % 2 == 0 for value in kernel_sizes):
+        raise ConfigurationError("augmentation.gaussian_blur.kernel_sizes must contain odd integers")
+    blur_sigma_min = _optional_nonnegative_float(
+        blur_mapping, "sigma_min", 0.1, "augmentation.gaussian_blur"
+    )
+    blur_sigma_max = _optional_nonnegative_float(
+        blur_mapping, "sigma_max", 1.0, "augmentation.gaussian_blur"
+    )
+    if blur_sigma_min > blur_sigma_max:
+        raise ConfigurationError("augmentation.gaussian_blur.sigma_min must not exceed sigma_max")
+    noise_mapping = _optional_mapping(resolved, "gaussian_noise")
+    noise_std_min = _optional_nonnegative_float(
+        noise_mapping, "std_min", 2.0, "augmentation.gaussian_noise"
+    )
+    noise_std_max = _optional_nonnegative_float(
+        noise_mapping, "std_max", 8.0, "augmentation.gaussian_noise"
+    )
+    if noise_std_min > noise_std_max:
+        raise ConfigurationError("augmentation.gaussian_noise.std_min must not exceed std_max")
+    affine_mapping = _optional_mapping(resolved, "affine")
+    scale_min = _optional_positive_float(
+        affine_mapping, "scale_min", 0.90, "augmentation.affine"
+    )
+    scale_max = _optional_positive_float(
+        affine_mapping, "scale_max", 1.10, "augmentation.affine"
+    )
+    if scale_min > scale_max:
+        raise ConfigurationError("augmentation.affine.scale_min must not exceed scale_max")
+    border_value = affine_mapping.get("border_value", 114)
+    if isinstance(border_value, bool) or not isinstance(border_value, int) or not 0 <= border_value <= 255:
+        raise ConfigurationError("augmentation.affine.border_value must be an integer in [0,255]")
     return AugmentationConfig(
         enabled=enabled,
+        preset=str(preset) if preset is not None else None,
+        overrides=dict(overrides) if isinstance(overrides, Mapping) else {},
         color_jitter=color_jitter,
-        horizontal_flip=_parse_augmentation_probability(
-            payload, "horizontal_flip"
+        horizontal_flip=_parse_augmentation_probability_mapping(
+            resolved, "horizontal_flip"
         ),
-        gaussian_blur=_parse_augmentation_probability(payload, "gaussian_blur"),
-        gaussian_noise=_parse_augmentation_probability(payload, "gaussian_noise"),
-        affine=_parse_augmentation_probability(payload, "affine"),
+        gaussian_blur=GaussianBlurConfig(
+            enabled=_optional_boolean(blur_mapping, "enabled", False, "augmentation.gaussian_blur"),
+            probability=_optional_probability(blur_mapping, "probability", 0.0, "augmentation.gaussian_blur"),
+            kernel_sizes=kernel_sizes,
+            sigma_min=blur_sigma_min,
+            sigma_max=blur_sigma_max,
+        ),
+        gaussian_noise=GaussianNoiseConfig(
+            enabled=_optional_boolean(noise_mapping, "enabled", False, "augmentation.gaussian_noise"),
+            probability=_optional_probability(noise_mapping, "probability", 0.0, "augmentation.gaussian_noise"),
+            std_min=noise_std_min,
+            std_max=noise_std_max,
+        ),
+        affine=AffineConfig(
+            enabled=_optional_boolean(affine_mapping, "enabled", False, "augmentation.affine"),
+            probability=_optional_probability(affine_mapping, "probability", 0.0, "augmentation.affine"),
+            scale_min=scale_min,
+            scale_max=scale_max,
+            translate_fraction=_optional_nonnegative_float(affine_mapping, "translate_fraction", 0.05, "augmentation.affine"),
+            rotation_degrees=_optional_nonnegative_float(affine_mapping, "rotation_degrees", 5.0, "augmentation.affine"),
+            min_visibility=_optional_probability(affine_mapping, "min_visibility", 0.25, "augmentation.affine"),
+            border_value=border_value,
+        ),
     )
 
 
@@ -668,6 +823,18 @@ def _parse_augmentation_probability(
         probability=_optional_probability(
             mapping, "probability", 0.0, "augmentation." + name
         ),
+    )
+
+
+def _parse_augmentation_probability_mapping(
+    payload: Mapping[str, Any], name: str
+) -> AugmentationProbabilityConfig:
+    """Parse an already-resolved operation mapping."""
+
+    mapping = _optional_mapping(payload, name)
+    return AugmentationProbabilityConfig(
+        enabled=_optional_boolean(mapping, "enabled", False, "augmentation." + name),
+        probability=_optional_probability(mapping, "probability", 0.0, "augmentation." + name),
     )
 
 
@@ -942,6 +1109,27 @@ def _optional_nonnegative_integer(
             "{}.{} must be a non-negative integer".format(section, name)
         )
     return value
+
+
+def _optional_integer_sequence(
+    payload: Mapping[str, Any],
+    name: str,
+    default: Sequence[int],
+    section: str,
+) -> Tuple[int, ...]:
+    """Return a non-empty YAML sequence of positive integers."""
+
+    value = payload.get(name, default)
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or not value:
+        raise ConfigurationError("{}.{} must be a non-empty integer list".format(section, name))
+    result = []
+    for index, item in enumerate(value):
+        if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+            raise ConfigurationError(
+                "{}.{}[{}] must be a positive integer".format(section, name, index)
+            )
+        result.append(int(item))
+    return tuple(result)
 
 
 def _optional_boolean(

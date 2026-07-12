@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import isfinite
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Tuple, Union
@@ -10,15 +10,14 @@ from typing import Any, Mapping, Optional, Sequence, Tuple, Union
 import cv2
 import numpy as np
 import yaml
-from torch.utils.data import get_worker_info
-
 from fomo_servo.config import AugmentationConfig
 from fomo_servo.datasets.augmentation import (
     AugmentationPipeline,
-    ColorJitterMetadata,
+    AugmentationMetadata,
 )
 from fomo_servo.datasets.heatmap import HeatmapTarget, generate_fomo_heatmap
 from fomo_servo.geometry.letterbox import LetterboxTransform, letterbox_rgb
+from fomo_servo.datasets.rng import make_sample_rng, stable_sample_seed
 
 
 class DatasetError(ValueError):
@@ -62,8 +61,8 @@ class FOMOSample:
     """One FOMO data sample without a batch dimension.
 
     ``image`` is normalized RGB ``float32 [3,S,S]``. ``original_image`` and
-    ``augmented_image`` are RGB ``uint8 [H,W,3]`` before letterbox; in the
-    locked no-op phase they are elementwise identical. ``letterbox_image`` is
+    ``augmented_image`` are RGB ``uint8 [H,W,3]`` before letterbox.
+    ``letterbox_image`` is
     RGB ``uint8 [S,S,3]``. ``original_boxes`` are pre-augmentation boxes and
     ``augmented_boxes`` are the boxes passed to letterbox. Heatmap shapes are
     documented by ``HeatmapTarget``.
@@ -78,7 +77,7 @@ class FOMOSample:
     letterbox_boxes: Tuple[AbsoluteBox, ...]
     transform: LetterboxTransform
     heatmap: HeatmapTarget
-    augmentation_metadata: ColorJitterMetadata
+    augmentation_metadata: AugmentationMetadata
     image_path: Path
     label_path: Path
 
@@ -145,6 +144,7 @@ class YOLOv5FOMODataset:
         )
         self.train_split = train_split
         self.augmentation_seed = augmentation_seed
+        self.current_epoch = 0
         self.is_train = split == train_split and split.lower() not in {
             "val",
             "valid",
@@ -189,9 +189,16 @@ class YOLOv5FOMODataset:
         return len(self.image_paths)
 
     def __getitem__(self, index: int) -> FOMOSample:
-        """Load one image with its deterministic worker-scoped augmentation RNG."""
+        """Load one image with its deterministic epoch/index augmentation RNG."""
 
         return self.get_sample(index)
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set the non-negative epoch used by subsequent train samples."""
+
+        if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+            raise DatasetError("epoch must be a non-negative integer")
+        self.current_epoch = epoch
 
     def get_sample(
         self,
@@ -202,7 +209,7 @@ class YOLOv5FOMODataset:
 
         ``image`` is normalized RGB ``float32 [3,S,S]`` and heatmap class indices
         are ``int64 [S/stride,S/stride]``. If ``rng`` is omitted, its seed combines
-        the configured augmentation seed, DataLoader worker seed, and sample index.
+        the configured augmentation seed, current epoch, and sample index.
         """
 
         image_path = self.image_paths[index]
@@ -225,10 +232,23 @@ class YOLOv5FOMODataset:
                 )
             )
 
+        if rng is None:
+            sample_seed = stable_sample_seed(
+                self.augmentation_seed, self.current_epoch, int(index)
+            )
+            sample_rng = make_sample_rng(
+                self.augmentation_seed, self.current_epoch, int(index)
+            )
+        else:
+            sample_seed = None
+            sample_rng = rng
         augmentation_result = self.augmentation_pipeline.apply(
             original_image,
             tuple(original_boxes),
-            self._sample_rng(index) if rng is None else rng,
+            sample_rng,
+            epoch=self.current_epoch,
+            sample_index=int(index),
+            sample_seed=sample_seed,
         )
         augmented_image = augmentation_result.image
         augmented_boxes = tuple(augmentation_result.boxes)
@@ -263,6 +283,11 @@ class YOLOv5FOMODataset:
             num_foreground_classes=self.num_foreground_classes,
             collision_policy=self.collision_policy,
         )
+        augmentation_metadata = replace(
+            augmentation_result.metadata,
+            same_class_collision_count=heatmap.same_class_collision_count,
+            different_class_collision_count=heatmap.different_class_collision_count,
+        )
         normalized_image = np.ascontiguousarray(
             letterbox_image.transpose(2, 0, 1), dtype=np.float32
         ) / 255.0
@@ -276,20 +301,10 @@ class YOLOv5FOMODataset:
             letterbox_boxes=tuple(letterbox_boxes),
             transform=transform,
             heatmap=heatmap,
-            augmentation_metadata=augmentation_result.metadata,
+            augmentation_metadata=augmentation_metadata,
             image_path=image_path,
             label_path=label_path,
         )
-
-    def _sample_rng(self, index: int) -> np.random.Generator:
-        """Create a local generator from configured and DataLoader worker seeds."""
-
-        worker_info = get_worker_info()
-        worker_seed = (
-            int(worker_info.seed) if worker_info is not None else self.augmentation_seed
-        )
-        seed = (worker_seed + self.augmentation_seed + int(index)) % (2**63 - 1)
-        return np.random.default_rng(seed)
 
     def _map_class_id(self, source_class_id: int) -> int:
         if self.class_mode == "merge_single":

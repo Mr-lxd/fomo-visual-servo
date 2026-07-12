@@ -1,4 +1,4 @@
-"""Visualize train-only color jitter and write a deterministic audit contact sheet."""
+"""Visualize train-only online augmentation presets and geometry."""
 
 from __future__ import annotations
 
@@ -50,6 +50,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--show", action="store_true")
+    parser.add_argument("--suite", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -613,6 +614,161 @@ def render_contact_sheet(
     return contact_path, json_path
 
 
+def _suite_record(
+    dataset: YOLOv5FOMODataset,
+    index: int,
+    case: str,
+    sample: FOMOSample,
+) -> dict[str, Any]:
+    """Serialize all suite metadata using only paths relative to the dataset root."""
+
+    metadata = sample.augmentation_metadata
+    return {
+        "relative_image_path": dataset.image_paths[index].relative_to(dataset.root).as_posix(),
+        "case": case,
+        "epoch": int(metadata.epoch),
+        "sample_index": int(metadata.sample_index),
+        "sample_seed": metadata.sample_seed,
+        "color_jitter_applied": bool(metadata.color_jitter_applied),
+        "horizontal_flip_applied": bool(metadata.horizontal_flip_applied),
+        "gaussian_blur_applied": bool(metadata.gaussian_blur_applied),
+        "gaussian_noise_applied": bool(metadata.gaussian_noise_applied),
+        "affine_applied": bool(metadata.affine_applied),
+        "brightness_factor": float(metadata.brightness_factor),
+        "contrast_factor": float(metadata.contrast_factor),
+        "saturation_factor": float(metadata.saturation_factor),
+        "hue_shift": float(metadata.hue_shift),
+        "blur_kernel": metadata.blur_kernel,
+        "blur_sigma": metadata.blur_sigma,
+        "noise_std": metadata.noise_std,
+        "affine_scale": metadata.affine_scale,
+        "affine_translate_x": metadata.affine_translate_x,
+        "affine_translate_y": metadata.affine_translate_y,
+        "affine_rotation": metadata.affine_rotation,
+        "original_boxes": _serialize_boxes(sample.original_boxes),
+        "augmented_boxes": _serialize_boxes(sample.augmented_boxes),
+        "original_centroids": _serialize_centroids(sample.original_boxes),
+        "augmented_centroids": _serialize_centroids(sample.augmented_boxes),
+        "clipped_bbox_count": int(metadata.clipped_bbox_count),
+        "dropped_bbox_count": int(metadata.dropped_bbox_count),
+        "pre_augmentation_object_count": int(metadata.pre_augmentation_object_count),
+        "post_augmentation_object_count": int(metadata.post_augmentation_object_count),
+        "same_class_collision_count": int(metadata.same_class_collision_count),
+        "different_class_collision_count": int(metadata.different_class_collision_count),
+    }
+
+
+def _suite_contact_sheet(
+    samples: Sequence[tuple[str, FOMOSample]],
+    dataset: YOLOv5FOMODataset,
+    output_path: Path,
+) -> None:
+    """Write a four-panel-per-image contact sheet for one suite scenario."""
+
+    rows = []
+    for index, sample_group in enumerate(samples):
+        panels = []
+        for case, sample in sample_group:
+            metadata = sample.augmentation_metadata
+            title = "{} e{} c{} d{}".format(
+                case,
+                metadata.epoch,
+                metadata.clipped_bbox_count,
+                metadata.dropped_bbox_count,
+            )
+            panels.append(
+                _render_variant_panel(
+                    sample.augmented_image,
+                    sample.augmented_boxes,
+                    sample,
+                    dataset.class_names,
+                    dataset.input_size,
+                    dataset.stride,
+                    title,
+                )
+            )
+        rows.append(np.hstack(panels))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    image = np.vstack(rows)
+    if not cv2.imwrite(str(output_path), image):
+        raise RuntimeError("unable to write suite contact sheet: {}".format(output_path))
+
+
+def render_augmentation_suite(
+    dataset: YOLOv5FOMODataset,
+    config: ProjectConfig,
+    output_dir: Path,
+    *,
+    num_images: int,
+    seed: int,
+) -> tuple[Path, Path, Path, Path, Path]:
+    """Render RNG epochs plus photometric, underwater and affine scenarios."""
+
+    if dataset.split.lower() != config.dataset.train_split.lower():
+        raise ValueError("augmentation suite visualization requires the train split")
+    if num_images <= 0 or len(dataset) < num_images:
+        raise ValueError("requested visualization images exceed the train split")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    raw_dataset = _dataset_with_augmentation(dataset, AugmentationConfig.disabled())
+    photometric_config = replace(
+        config.augmentation,
+        preset="photometric",
+        horizontal_flip=replace(config.augmentation.horizontal_flip, enabled=False, probability=0.0),
+        affine=replace(config.augmentation.affine, enabled=False, probability=0.0),
+    )
+    affine_config = replace(
+        config.augmentation,
+        preset="custom",
+        color_jitter=replace(config.augmentation.color_jitter, enabled=False, probability=0.0),
+        horizontal_flip=replace(config.augmentation.horizontal_flip, enabled=False, probability=0.0),
+        gaussian_blur=replace(config.augmentation.gaussian_blur, enabled=False, probability=0.0),
+        gaussian_noise=replace(config.augmentation.gaussian_noise, enabled=False, probability=0.0),
+        affine=replace(config.augmentation.affine, enabled=True, probability=1.0),
+    )
+    photometric_dataset = _dataset_with_augmentation(dataset, photometric_config)
+    underwater_dataset = _dataset_with_augmentation(dataset, config.augmentation)
+    affine_dataset = _dataset_with_augmentation(dataset, affine_config)
+    rng_groups = []
+    photometric_groups = []
+    underwater_groups = []
+    affine_groups = []
+    records = []
+    for index in range(num_images):
+        raw_dataset.set_epoch(0)
+        raw = raw_dataset[index]
+        epoch_samples = []
+        for epoch in (0, 1, 2):
+            dataset.set_epoch(epoch)
+            sample = dataset[index]
+            epoch_samples.append(("epoch{}".format(epoch), sample))
+            records.append(_suite_record(dataset, index, "rng_epoch{}".format(epoch), sample))
+        rng_groups.append(tuple([("original", raw)] + epoch_samples))
+        photometric_dataset.set_epoch(0)
+        photometric = photometric_dataset[index]
+        photometric_groups.append((("original", raw), ("photometric", photometric)))
+        records.append(_suite_record(photometric_dataset, index, "photometric", photometric))
+        underwater_dataset.set_epoch(0)
+        underwater = underwater_dataset[index]
+        underwater_groups.append((("original", raw), ("underwater", underwater)))
+        records.append(_suite_record(underwater_dataset, index, "underwater_conservative", underwater))
+        affine_dataset.set_epoch(0)
+        affine = affine_dataset[index]
+        affine_groups.append((("original", raw), ("affine", affine)))
+        records.append(_suite_record(affine_dataset, index, "affine_geometry", affine))
+
+    rng_path = output_dir / "rng_across_epochs_contact_sheet.jpg"
+    photometric_path = output_dir / "photometric_preset_contact_sheet.jpg"
+    underwater_path = output_dir / "underwater_conservative_contact_sheet.jpg"
+    affine_path = output_dir / "affine_geometry_contact_sheet.jpg"
+    json_path = output_dir / "augmentation_samples.json"
+    _suite_contact_sheet(rng_groups, dataset, rng_path)
+    _suite_contact_sheet(photometric_groups, dataset, photometric_path)
+    _suite_contact_sheet(underwater_groups, dataset, underwater_path)
+    _suite_contact_sheet(affine_groups, dataset, affine_path)
+    json_path.write_text(json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
+    return rng_path, photometric_path, underwater_path, affine_path, json_path
+
+
 def _load_dataset_and_context(
     args: argparse.Namespace,
 ) -> tuple[YOLOv5FOMODataset, Optional[ProjectConfig], int]:
@@ -660,7 +816,7 @@ def _load_dataset_and_context(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Render one legacy panel or the config-driven aug01 contact sheet."""
+    """Render one legacy panel, an experiment contact sheet, or the full suite."""
 
     args = _parse_args(argv)
     dataset, config, seed = _load_dataset_and_context(args)
@@ -682,6 +838,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if config is None:
         raise ValueError("--config is required for contact-sheet mode")
     output_dir = args.output_dir or (config.training.output_dir / "visualization")
+    if args.suite or config.experiment.name == "augmentation_suite":
+        paths = render_augmentation_suite(
+            dataset,
+            config,
+            output_dir,
+            num_images=args.num_images,
+            seed=seed,
+        )
+        for path in paths:
+            print("Wrote {}".format(path))
+        return 0
     if config.augmentation.horizontal_flip.enabled:
         contact_path, json_path = render_horizontal_flip_contact_sheet(
             dataset,

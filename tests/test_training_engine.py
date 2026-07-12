@@ -165,6 +165,9 @@ def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path)
     assert checkpoint_payload["class_weight_mode"] == "manual"
     assert checkpoint_payload["class_weights"] == [1.0, 3.0]
     assert len(checkpoint_payload["class_statistics"]) == 1
+    assert checkpoint_payload["augmentation_preset"] is None
+    assert "color_jitter" in checkpoint_payload["resolved_augmentation"]
+    assert checkpoint_payload["augmentation_stats"]["total_samples"] > 0
     training_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert training_summary["class_weight_mode"] == "manual"
     assert training_summary["class_weights"] == [1.0, 3.0]
@@ -173,9 +176,12 @@ def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path)
     assert training_summary["best_centroid_epoch"] >= 1
     assert training_summary["checkpoint_threshold"] == pytest.approx(0.5)
     assert training_summary["best_val_f1_alias_target"] == "best_grid_f1.pt"
+    assert len(training_summary["augmentation_epoch_stats"]) == 2
+    assert [item["epoch"] for item in training_summary["augmentation_epoch_stats"]] == [1, 2]
     with history_path.open("r", newline="", encoding="utf-8") as history_file:
         first_rows = list(csv.DictReader(history_file))
     assert len(first_rows) == 2
+    assert "augmentation_stats" in first_rows[0]
     assert set(
         (
             "train_loss",
@@ -205,6 +211,37 @@ def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path)
     with history_path.open("r", newline="", encoding="utf-8") as history_file:
         resumed_rows = list(csv.DictReader(history_file))
     assert len(resumed_rows) == 3
+    resumed_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert resumed_summary["augmentation_epoch_stats"][-1]["epoch"] == 3
+
+
+def test_training_propagates_epoch_to_train_dataset_and_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The train Dataset receives the current and resumed epoch before loading data."""
+
+    _, run_training, _ = _engine_api()
+    assert callable(run_training)
+    calls: list[int] = []
+    original_set_epoch = YOLOv5FOMODataset.set_epoch
+
+    def recording_set_epoch(dataset: YOLOv5FOMODataset, epoch: int) -> None:
+        calls.append(epoch)
+        original_set_epoch(dataset, epoch)
+
+    monkeypatch.setattr(YOLOv5FOMODataset, "set_epoch", recording_set_epoch)
+    output_dir = tmp_path / "epoch-aware-run"
+    first = load_config(_write_training_config(tmp_path / "first.yaml", output_dir, epochs=1))
+    run_training(first, device_override="cpu")
+    assert calls == [1]
+
+    resumed = load_config(
+        _write_training_config(
+            tmp_path / "resumed.yaml", output_dir, epochs=2, resume=output_dir / "last.pt"
+        )
+    )
+    run_training(resumed, device_override="cpu")
+    assert calls == [1, 2]
 
 
 def test_experiment_run_writes_reproducibility_artifacts(

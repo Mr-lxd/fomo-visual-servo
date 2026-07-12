@@ -110,6 +110,41 @@ training:
 
 `device: auto` 在 CUDA 可用时选择 GPU，否则选择 CPU。若显式请求 `cuda` 而当前 PyTorch 不可用 CUDA，程序会报出明确错误；不会静默回退。AMP 和 pin memory 在 CPU 上会被禁用，并由命令输出明确说明。
 
+## 在线 augmentation suite
+
+增强只在 train split 的每次样本读取阶段执行，不缓存增强图像。固定顺序为：
+
+```text
+horizontal flip → affine → color jitter → Gaussian blur → Gaussian noise
+→ letterbox → normalize → FOMO heatmap
+```
+
+推荐使用 preset：
+
+```yaml
+augmentation:
+  enabled: true
+  preset: underwater_conservative
+  overrides: {}
+```
+
+内置 preset 为 `none`、`photometric`、`underwater_conservative` 和 `custom`。`overrides` 只能覆盖已知的点号字段；未知 preset 或字段会明确报错。旧的逐项 `color_jitter`、`horizontal_flip` 等配置仍可加载，但会发出弃用警告。
+
+Dataset 的 augmentation seed 由 `base_seed + epoch + sample_index` 的稳定 64-bit hash 派生，不依赖 worker id。训练在每个 epoch 开始前更新 Dataset epoch；同一 epoch/index 可复现，不同 epoch 通常产生不同增强。当前 DataLoader 明确使用 `persistent_workers=false`。validation/test 始终跳过全部增强。
+
+完整 suite 的可视化命令示例：
+
+```powershell
+$env:FOMO_DATASET_ROOT = 'C:/path/to/aquarium_pretrain'
+python scripts/visualize_augmentations.py `
+  --config configs/experiments/augmentation_suite.yaml `
+  --split train `
+  --num-images 16 `
+  --suite
+```
+
+运行结果写入 `outputs/experiments/augmentation_suite/visualization/`，包括不同 epoch、photometric、underwater 和 affine geometry 接触表以及 `augmentation_samples.json`。增强触发率、bbox clipping/drop、目标数量和 collision 统计写入 `history.csv` 与 `training_summary.json`。
+
 `scripts/train.py` 会执行完整的训练与验证流程，并支持设备与 checkpoint 覆盖：
 
 ```powershell

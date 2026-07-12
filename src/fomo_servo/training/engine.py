@@ -6,9 +6,9 @@ import csv
 import json
 import random
 from time import perf_counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import torch
@@ -17,7 +17,13 @@ from torch.optim import AdamW, Optimizer
 from torch.optim.lr_scheduler import LRScheduler, StepLR
 from torch.utils.data import DataLoader
 
-from fomo_servo.config import EvaluationConfig, PostprocessConfig, ProjectConfig, SchedulerConfig
+from fomo_servo.config import (
+    EvaluationConfig,
+    PostprocessConfig,
+    ProjectConfig,
+    SchedulerConfig,
+    resolved_augmentation_dict,
+)
 from fomo_servo.datasets import (
     FOMOBatch,
     YOLOv5FOMODataset,
@@ -125,6 +131,74 @@ class TrainingSummary:
     final_sweep_best_threshold: float | None = None
     best_val_f1_alias_target: str = "best_grid_f1.pt"
     total_training_time_seconds: float = 0.0
+    augmentation_preset: Optional[str] = None
+    resolved_augmentation: dict[str, Any] = field(default_factory=dict)
+    augmentation_epoch_stats: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass
+class AugmentationEpochStats:
+    """Mutable train-split augmentation counters for one epoch."""
+
+    total_samples: int = 0
+    color_jitter_applied_count: int = 0
+    horizontal_flip_applied_count: int = 0
+    gaussian_blur_applied_count: int = 0
+    gaussian_noise_applied_count: int = 0
+    affine_applied_count: int = 0
+    clipped_bbox_count: int = 0
+    dropped_bbox_count: int = 0
+    pre_augmentation_object_count: int = 0
+    post_augmentation_object_count: int = 0
+    same_class_collision_count: int = 0
+    different_class_collision_count: int = 0
+
+    def update(self, metadata: Sequence[Any]) -> None:
+        """Aggregate one collated batch of sample metadata."""
+
+        for item in metadata:
+            self.total_samples += 1
+            self.color_jitter_applied_count += int(bool(item.color_jitter_applied))
+            self.horizontal_flip_applied_count += int(bool(item.horizontal_flip_applied))
+            self.gaussian_blur_applied_count += int(bool(item.gaussian_blur_applied))
+            self.gaussian_noise_applied_count += int(bool(item.gaussian_noise_applied))
+            self.affine_applied_count += int(bool(item.affine_applied))
+            self.clipped_bbox_count += int(item.clipped_bbox_count)
+            self.dropped_bbox_count += int(item.dropped_bbox_count)
+            self.pre_augmentation_object_count += int(item.pre_augmentation_object_count)
+            self.post_augmentation_object_count += int(item.post_augmentation_object_count)
+            self.same_class_collision_count += int(item.same_class_collision_count)
+            self.different_class_collision_count += int(item.different_class_collision_count)
+
+    def as_dict(self) -> dict[str, Any]:
+        denominator = float(self.total_samples) if self.total_samples else 1.0
+        return {
+            "total_samples": self.total_samples,
+            "color_jitter_applied_count": self.color_jitter_applied_count,
+            "color_jitter_applied_rate": self.color_jitter_applied_count / denominator,
+            "horizontal_flip_applied_count": self.horizontal_flip_applied_count,
+            "horizontal_flip_applied_rate": self.horizontal_flip_applied_count / denominator,
+            "gaussian_blur_applied_count": self.gaussian_blur_applied_count,
+            "gaussian_blur_applied_rate": self.gaussian_blur_applied_count / denominator,
+            "gaussian_noise_applied_count": self.gaussian_noise_applied_count,
+            "gaussian_noise_applied_rate": self.gaussian_noise_applied_count / denominator,
+            "affine_applied_count": self.affine_applied_count,
+            "affine_applied_rate": self.affine_applied_count / denominator,
+            "clipped_bbox_count": self.clipped_bbox_count,
+            "dropped_bbox_count": self.dropped_bbox_count,
+            "pre_augmentation_object_count": self.pre_augmentation_object_count,
+            "post_augmentation_object_count": self.post_augmentation_object_count,
+            "same_class_collision_count": self.same_class_collision_count,
+            "different_class_collision_count": self.different_class_collision_count,
+        }
+
+
+@dataclass(frozen=True)
+class TrainEpochResult:
+    """Loss and online augmentation statistics for one train epoch."""
+
+    loss: float
+    augmentation_stats: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -161,6 +235,24 @@ _HISTORY_COLUMNS = (
     "recall",
     "f1",
     "learning_rate",
+    "total_samples",
+    "color_jitter_applied_count",
+    "color_jitter_applied_rate",
+    "horizontal_flip_applied_count",
+    "horizontal_flip_applied_rate",
+    "gaussian_blur_applied_count",
+    "gaussian_blur_applied_rate",
+    "gaussian_noise_applied_count",
+    "gaussian_noise_applied_rate",
+    "affine_applied_count",
+    "affine_applied_rate",
+    "clipped_bbox_count",
+    "dropped_bbox_count",
+    "pre_augmentation_object_count",
+    "post_augmentation_object_count",
+    "same_class_collision_count",
+    "different_class_collision_count",
+    "augmentation_stats",
 )
 
 
@@ -253,6 +345,28 @@ def run_training(
     output_dir.mkdir(parents=True, exist_ok=True)
     history_path = output_dir / "history.csv"
     resume_path = resume_override if resume_override is not None else config.training.resume
+    augmentation_epoch_stats: list[dict[str, Any]] = []
+    if resume_path is not None:
+        previous_summary_path = output_dir / "training_summary.json"
+        if previous_summary_path.is_file():
+            try:
+                previous_summary = json.loads(
+                    previous_summary_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError) as error:
+                raise TrainingError(
+                    "unable to read previous training summary '{}': {}".format(
+                        previous_summary_path, error
+                    )
+                ) from error
+            previous_stats = previous_summary.get("augmentation_epoch_stats", [])
+            if not isinstance(previous_stats, list) or any(
+                not isinstance(item, dict) for item in previous_stats
+            ):
+                raise TrainingError(
+                    "previous training summary augmentation_epoch_stats must be a list of mappings"
+                )
+            augmentation_epoch_stats.extend(previous_stats)
     if resume_path is None:
         _initialize_history(history_path, append=False)
         resume_state = _ResumeState(
@@ -287,7 +401,8 @@ def run_training(
     completed_epochs = resume_state.start_epoch - 1
     stopped_early = False
     for epoch in range(resume_state.start_epoch, config.training.epochs + 1):
-        train_loss = train_one_epoch(
+        train_dataset.set_epoch(epoch)
+        train_result = train_one_epoch(
             model=model,
             loader=train_loader,
             criterion=criterion,
@@ -295,6 +410,10 @@ def run_training(
             scaler=scaler,
             runtime=runtime,
         )
+        train_loss = train_result.loss
+        train_augmentation_stats = dict(train_result.augmentation_stats)
+        train_augmentation_stats["epoch"] = epoch
+        augmentation_epoch_stats.append(train_augmentation_stats)
         validation = validate_one_epoch(
             model=model,
             loader=validation_loader,
@@ -354,6 +473,9 @@ def run_training(
                 if config.training.checkpoint_criterion == "grid_f1"
                 else "best_centroid_f1.pt"
             ),
+            augmentation_preset=config.augmentation.preset,
+            resolved_augmentation=resolved_augmentation_dict(config.augmentation),
+            augmentation_stats=train_augmentation_stats,
         )
         torch.save(
             _checkpoint_payload(
@@ -396,6 +518,7 @@ def run_training(
             train_loss=train_loss,
             validation=validation,
             learning_rate=learning_rate,
+            augmentation_stats=train_augmentation_stats,
         )
         completed_epochs = epoch
         if (
@@ -429,6 +552,9 @@ def run_training(
             else "best_centroid_f1.pt"
         ),
         total_training_time_seconds=perf_counter() - training_started,
+        augmentation_preset=config.augmentation.preset,
+        resolved_augmentation=resolved_augmentation_dict(config.augmentation),
+        augmentation_epoch_stats=tuple(augmentation_epoch_stats),
     )
     if config.experiment.name is not None:
         final_sweep_best_threshold = _record_experiment(
@@ -455,13 +581,15 @@ def train_one_epoch(
     optimizer: Optimizer,
     scaler: torch.amp.GradScaler,
     runtime: TrainingRuntime,
-) -> float:
-    """Run one train epoch and return sample-weighted scalar loss."""
+) -> TrainEpochResult:
+    """Run one train epoch and return loss plus augmentation counters."""
 
     model.train()
     total_loss = 0.0
     total_samples = 0
+    augmentation_stats = AugmentationEpochStats()
     for batch in loader:
+        augmentation_stats.update(batch.augmentation_metadata)
         images, targets = move_training_batch(batch.images, batch.targets, runtime)
         optimizer.zero_grad(set_to_none=True)
         with autocast_context(runtime):
@@ -479,7 +607,10 @@ def train_one_epoch(
         total_samples += batch_size
     if total_samples == 0:
         raise TrainingError("training DataLoader produced no batches")
-    return total_loss / total_samples
+    return TrainEpochResult(
+        loss=total_loss / total_samples,
+        augmentation_stats=augmentation_stats.as_dict(),
+    )
 
 
 def validate_one_epoch(
@@ -623,6 +754,7 @@ def _build_data_loaders(
         "pin_memory": runtime.pin_memory,
         "collate_fn": collate_fomo_samples,
         "worker_init_fn": _seed_data_loader_worker,
+        "persistent_workers": False,
     }
     return (
         DataLoader(
@@ -757,6 +889,8 @@ def _record_experiment(
             "dataset_file_list_hash": file_hash,
             "dataset_content_hash": content_manifest["dataset_content_hash"],
             "random_seed": config.training.seed,
+            "augmentation_preset": config.augmentation.preset,
+            "resolved_augmentation": resolved_augmentation_dict(config.augmentation),
             "best_centroid_f1": result.centroid_f1,
             "best_grid_f1": summary.best_grid_f1,
             "precision": result.centroid_precision,
@@ -838,6 +972,9 @@ def _write_training_summary(summary_path: Path, summary: TrainingSummary) -> Non
         "class_weight_mode": summary.class_weight_mode,
         "class_weights": list(summary.class_weights),
         "class_statistics": [item.as_dict() for item in summary.class_statistics],
+        "augmentation_preset": summary.augmentation_preset,
+        "resolved_augmentation": summary.resolved_augmentation,
+        "augmentation_epoch_stats": list(summary.augmentation_epoch_stats),
     }
     try:
         summary_path.write_text(
@@ -886,6 +1023,7 @@ def _append_history(
     train_loss: float,
     validation: EpochMetrics,
     learning_rate: float,
+    augmentation_stats: Mapping[str, Any],
 ) -> None:
     """Append one train/validation metrics row to a configured history CSV."""
 
@@ -918,6 +1056,12 @@ def _append_history(
                 "recall": validation.grid_recall,
                 "f1": validation.grid_f1,
                 "learning_rate": learning_rate,
+                **{
+                    name: augmentation_stats.get(name, 0)
+                    for name in _HISTORY_COLUMNS
+                    if name in augmentation_stats
+                },
+                "augmentation_stats": json.dumps(augmentation_stats, sort_keys=True),
             }
         )
 
@@ -943,6 +1087,9 @@ def _checkpoint_payload(
     selection_metric: str,
     selection_threshold: float,
     best_val_f1_alias_target: str,
+    augmentation_preset: Optional[str],
+    resolved_augmentation: Mapping[str, Any],
+    augmentation_stats: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Capture resume state and explicit fixed-threshold selection metadata."""
 
@@ -972,6 +1119,9 @@ def _checkpoint_payload(
         "class_weights": list(resolved_weights.weights),
         "class_statistics": [item.as_dict() for item in resolved_weights.statistics],
         "rng_state": _capture_rng_state(),
+        "augmentation_preset": augmentation_preset,
+        "resolved_augmentation": dict(resolved_augmentation),
+        "augmentation_stats": dict(augmentation_stats),
     }
 
 

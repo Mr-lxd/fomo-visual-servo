@@ -244,20 +244,16 @@ def test_disabled_dataset_is_deterministic_for_repeated_worker_style_reads(
     _sample_equal(dataset[0], dataset[0])
 
 
-def test_enabled_future_augmentation_fails_explicitly(tmp_path: Path) -> None:
-    """A non-color operation cannot be silently treated as implemented."""
+def test_forbidden_augmentation_fails_explicitly(tmp_path: Path) -> None:
+    """A forbidden operation cannot be silently accepted by the schema."""
 
     enabled = _disabled_yaml().replace("enabled: false", "enabled: true", 1)
     enabled = enabled.replace(
-        "  gaussian_blur:\n    enabled: false",
-        "  gaussian_blur:\n    enabled: true",
+        "  affine:\n    enabled: false\n    probability: 0.0",
+        "  affine:\n    enabled: false\n    probability: 0.0\n  vertical_flip:\n    enabled: true\n    probability: 1.0",
     )
-    config = load_config(_write_config(tmp_path / "enabled.yaml", enabled))
     pipeline_type, error_type, _ = _augmentation_api()
     assert callable(pipeline_type), "AugmentationPipeline must be importable"
     assert isinstance(error_type, type), "AugmentationNotImplementedError must exist"
-
-    with pytest.raises(error_type, match="only color_jitter"):
-        pipeline_type(config.augmentation, is_train=True).apply(
-            np.zeros((12, 20, 3), dtype=np.uint8), (), np.random.default_rng(42)
-        )
+    with pytest.raises(Exception, match="unknown|vertical_flip"):
+        load_config(_write_config(tmp_path / "enabled.yaml", enabled))
