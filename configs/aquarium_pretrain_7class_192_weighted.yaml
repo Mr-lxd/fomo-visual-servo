@@ -1,5 +1,5 @@
 project:
-  name: aquarium_pretrain_7class
+  name: aquarium_pretrain_7class_weighted
 
 dataset:
   root: "${FOMO_DATASET_ROOT}"
@@ -42,14 +42,12 @@ loss:
   name: focal_cross_entropy
   gamma: 2.0
   class_weights:
-    - 1.0
-    - 4.0
-    - 4.0
-    - 4.0
-    - 4.0
-    - 4.0
-    - 4.0
-    - 4.0
+    mode: auto
+    background_weight: 1.0
+    foreground_base_weight: 25.0
+    class_balance: sqrt_inverse_frequency
+    min_foreground_weight: 12.5
+    max_foreground_weight: 75.0
 
 training:
   device: auto
@@ -60,11 +58,11 @@ training:
   batch_size: 8
   epochs: 100
   seed: 42
-  output_dir: outputs/aquarium_pretrain_7class_192
+  output_dir: outputs/aquarium_pretrain_7class_192_weighted
   resume: null
   early_stopping_patience: 15
   early_stopping_min_delta: 0.0
-  checkpoint_criterion: grid_f1
+  checkpoint_criterion: centroid_f1
   optimizer:
     name: adamw
     learning_rate: 0.001

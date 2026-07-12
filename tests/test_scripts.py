@@ -18,6 +18,8 @@ FUTURE_COMMANDS = (
     "benchmark.py",
 )
 
+IMPLEMENTED_COMMANDS = {"evaluate.py", "predict_image.py", "predict_video.py"}
+
 
 @pytest.mark.parametrize("script_name", FUTURE_COMMANDS)
 def test_future_commands_fail_explicitly_until_implemented(script_name: str) -> None:
@@ -30,7 +32,10 @@ def test_future_commands_fail_explicitly_until_implemented(script_name: str) -> 
     )
 
     assert result.returncode == 2
-    assert f"{Path(script_name).stem} is not implemented" in result.stderr
+    if script_name in IMPLEMENTED_COMMANDS:
+        assert "usage:" in result.stderr.lower()
+    else:
+        assert f"{Path(script_name).stem} is not implemented" in result.stderr
 
 
 def test_environment_check_reports_current_environment() -> None:

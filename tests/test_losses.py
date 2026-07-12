@@ -85,3 +85,53 @@ def test_loss_rejects_class_weight_count_mismatch() -> None:
 
     with pytest.raises(error_type, match="class_weights length"):
         criterion(torch.randn(1, 2, 2, 2), torch.zeros(1, 2, 2, dtype=torch.int64))
+
+
+def test_manual_eight_class_focal_loss_and_gradient_regression() -> None:
+    """Manual [1,4,...] focal CE matches an independent float32 reference and gradients."""
+
+    _, builder, _ = _loss_api()
+    assert callable(builder), "fomo_servo.losses.build_classification_loss must exist"
+    weights = (1.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0)
+    logits = torch.tensor(
+        [
+            [
+                [[2.0, -1.0], [0.5, 1.5]],
+                [[-0.5, 2.0], [1.0, -1.0]],
+                [[0.0, 0.5], [-0.5, 1.0]],
+                [[-1.0, 0.0], [1.0, 0.5]],
+                [[0.5, -0.5], [0.0, 1.0]],
+                [[-0.2, 0.2], [0.8, -0.8]],
+                [[0.3, 0.1], [-0.1, 0.4]],
+                [[-0.4, 0.6], [0.2, -0.3]],
+            ]
+        ],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    targets = torch.tensor([[[0, 1], [6, 7]]], dtype=torch.int64)
+    criterion = builder(_loss_config("focal_cross_entropy", 2.0, weights))
+    actual = criterion(logits, targets)
+    actual.backward()
+    actual_gradient = logits.grad.detach().clone()
+
+    reference_logits = logits.detach().clone().requires_grad_(True)
+    probabilities = functional.softmax(reference_logits, dim=1)
+    target_probabilities = probabilities.gather(1, targets.unsqueeze(1)).squeeze(1)
+    target_weights = torch.tensor(weights, dtype=torch.float32)[targets]
+    reference = (
+        -((1.0 - target_probabilities).pow(2.0))
+        * torch.log(target_probabilities)
+        * target_weights
+    ).sum() / target_weights.sum()
+    reference.backward()
+
+    torch.testing.assert_close(actual.detach(), reference.detach(), rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(logits.grad, reference_logits.grad, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(
+        criterion.class_weights,
+        torch.tensor(weights, dtype=torch.float32),
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert actual_gradient.shape == logits.shape

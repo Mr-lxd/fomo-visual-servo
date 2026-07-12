@@ -13,18 +13,39 @@ class MetricError(ValueError):
 
 
 @dataclass(frozen=True)
-class ForegroundMetrics:
-    """Foreground micro counts and derived precision/recall/F1 values."""
+class GridMetrics:
+    """Grid-level foreground micro counts and grid precision/recall/F1 values."""
 
     true_positives: int
     false_positives: int
     false_negatives: int
-    precision: float
-    recall: float
-    f1: float
+    grid_precision: float
+    grid_recall: float
+    grid_f1: float
+
+    @property
+    def precision(self) -> float:
+        """Backward-compatible alias for ``grid_precision``."""
+
+        return self.grid_precision
+
+    @property
+    def recall(self) -> float:
+        """Backward-compatible alias for ``grid_recall``."""
+
+        return self.grid_recall
+
+    @property
+    def f1(self) -> float:
+        """Backward-compatible alias for ``grid_f1``."""
+
+        return self.grid_f1
 
 
-def foreground_micro_metrics(predictions: Tensor, targets: Tensor) -> ForegroundMetrics:
+ForegroundMetrics = GridMetrics
+
+
+def foreground_micro_metrics(predictions: Tensor, targets: Tensor) -> GridMetrics:
     """Compute foreground micro metrics from class-index tensors [B,G,G].
 
     Background class zero is excluded. A foreground wrong-class prediction is both a
@@ -54,11 +75,11 @@ def foreground_micro_metrics(predictions: Tensor, targets: Tensor) -> Foreground
     recall = true_positives / recall_denominator if recall_denominator else 0.0
     f1_denominator = precision + recall
     f1 = 2.0 * precision * recall / f1_denominator if f1_denominator else 0.0
-    return ForegroundMetrics(
+    return GridMetrics(
         true_positives=true_positives,
         false_positives=false_positives,
         false_negatives=false_negatives,
-        precision=precision,
-        recall=recall,
-        f1=f1,
+        grid_precision=precision,
+        grid_recall=recall,
+        grid_f1=f1,
     )

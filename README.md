@@ -189,3 +189,44 @@ python scripts/visualize_yolo_heatmap.py `
 ```powershell
 python scripts/train.py --config configs/aquarium_pretrain_192.yaml --device cuda
 ```
+
+## 后处理、验证与推理
+
+模型 checkpoint 只保存 logits；softmax、8 邻域连通域、质心坐标反变换和目标选择在模型外执行。图片推理示例：
+
+```powershell
+$env:FOMO_DATASET_ROOT = 'C:/path/to/aquarium_pretrain'
+python scripts/predict_image.py `
+  --config configs/aquarium_pretrain_192.yaml `
+  --checkpoint outputs/aquarium_pretrain_7class_192/best_val_f1.pt `
+  --image C:/path/to/image.jpg `
+  --device cuda `
+  --strategy highest_confidence `
+  --output-image outputs/prediction.jpg `
+  --output-json outputs/prediction.json
+```
+
+完整 validation 会使用与推理相同的后处理，并在配置的 validation split 上执行 confidence threshold sweep：
+
+```powershell
+python scripts/evaluate.py `
+  --config configs/aquarium_pretrain_192.yaml `
+  --checkpoint outputs/aquarium_pretrain_7class_192/best_val_f1.pt `
+  --device cuda `
+  --output-json outputs/validation_report.json
+```
+
+视频推理使用单帧 latest buffer，旧帧会被丢弃以避免实时运行时积压：
+
+```powershell
+python scripts/predict_video.py `
+  --source input.mp4 `
+  --config configs/aquarium_pretrain_192.yaml `
+  --checkpoint outputs/aquarium_pretrain_7class_192/best_val_f1.pt `
+  --device cuda `
+  --output-video outputs/prediction.mp4 `
+  --output-csv outputs/prediction.csv `
+  --output-jsonl outputs/prediction.jsonl
+```
+
+`normalized_x/y` 使用原图像素坐标归一化到 `[-1,1]`；左/上为负，右/下为正。视频中的 jitter、availability、loss rate 和 reacquisition 是运行稳定性统计，不是 MOT 身份跟踪指标。

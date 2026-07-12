@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import importlib
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -145,15 +146,42 @@ def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path)
 
     last_checkpoint = output_dir / "last.pt"
     best_checkpoint = output_dir / "best_val_f1.pt"
+    best_grid_checkpoint = output_dir / "best_grid_f1.pt"
+    best_centroid_checkpoint = output_dir / "best_centroid_f1.pt"
     history_path = output_dir / "history.csv"
+    summary_path = output_dir / "training_summary.json"
     assert first_summary.completed_epochs == 2
     assert first_summary.best_val_f1 >= 0.0
     assert last_checkpoint.is_file()
     assert best_checkpoint.is_file()
+    assert best_grid_checkpoint.is_file()
+    assert best_centroid_checkpoint.is_file()
+    assert summary_path.is_file()
+    checkpoint_payload = torch.load(last_checkpoint, map_location="cpu", weights_only=False)
+    assert checkpoint_payload["class_weight_mode"] == "manual"
+    assert checkpoint_payload["class_weights"] == [1.0, 3.0]
+    assert len(checkpoint_payload["class_statistics"]) == 1
+    training_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert training_summary["class_weight_mode"] == "manual"
+    assert training_summary["class_weights"] == [1.0, 3.0]
+    assert len(training_summary["class_statistics"]) == 1
     with history_path.open("r", newline="", encoding="utf-8") as history_file:
         first_rows = list(csv.DictReader(history_file))
     assert len(first_rows) == 2
-    assert set(("train_loss", "val_loss", "precision", "recall", "f1")).issubset(
+    assert set(
+        (
+            "train_loss",
+            "val_loss",
+            "grid_precision",
+            "grid_recall",
+            "grid_f1",
+            "centroid_precision",
+            "centroid_recall",
+            "centroid_f1",
+            "mean_count_bias",
+            "mean_absolute_count_error",
+        )
+    ).issubset(
         first_rows[0]
     )
 
@@ -169,3 +197,46 @@ def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path)
     with history_path.open("r", newline="", encoding="utf-8") as history_file:
         resumed_rows = list(csv.DictReader(history_file))
     assert len(resumed_rows) == 3
+
+
+def test_experiment_run_writes_reproducibility_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An opted-in run writes a config copy, metadata JSON, and one CSV row."""
+
+    _, run_training, _ = _engine_api()
+    assert callable(run_training), "fomo_servo.training.run_training must exist"
+    monkeypatch.setattr(
+        "fomo_servo.training.engine.git_commit_sha", lambda _: "a" * 40
+    )
+    monkeypatch.setattr(
+        "fomo_servo.training.engine.git_worktree_fingerprint",
+        lambda _: (True, "b" * 64),
+    )
+    output_dir = tmp_path / "experiment-output"
+    config_path = _write_training_config(tmp_path / "experiment.yaml", output_dir, epochs=1)
+    with config_path.open("a", encoding="utf-8") as config_file:
+        config_file.write(
+            "\nexperiment:\n"
+            "  name: smoke_experiment\n"
+            f"  summary_csv: \"{(tmp_path / 'experiments_summary.csv').as_posix()}\"\n"
+        )
+
+    config = load_config(config_path)
+    summary = run_training(config, device_override="cpu")
+
+    assert summary.completed_epochs == 1
+    assert "WARNING: Git worktree is dirty" in capsys.readouterr().out
+    assert (output_dir / "config.yaml").read_text(encoding="utf-8") == config_path.read_text(
+        encoding="utf-8"
+    )
+    metadata = json.loads((output_dir / "experiment_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["experiment_name"] == "smoke_experiment"
+    assert metadata["random_seed"] == 123
+    assert metadata["best_epoch"] == 1
+    assert metadata["total_training_time_seconds"] >= 0.0
+    with (tmp_path / "experiments_summary.csv").open("r", newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    assert len(rows) == 1
+    assert rows[0]["experiment_name"] == "smoke_experiment"
+    assert rows[0]["best_threshold"]

@@ -124,7 +124,12 @@ training:
     assert config.training.num_workers == 4
     assert config.training.pin_memory is True
     assert hasattr(config.training, "epochs"), "training.epochs must be available"
+    assert config.training.checkpoint_criterion == "grid_f1"
     assert hasattr(config, "loss"), "loss configuration must be available"
+    assert config.postprocess.component_mode == "connected_components"
+    assert config.evaluation.matching_mode == "centroid_in_bbox"
+    assert config.loss.class_weight_mode == "manual"
+    assert config.loss.class_weights == (1.0, 1.0)
 
 
 def test_load_config_accepts_uppercase_train_alias(tmp_path: Path) -> None:
@@ -155,6 +160,69 @@ TRAIN:
     assert config.training.amp is False
     assert config.training.num_workers == 0
     assert config.training.pin_memory is False
+
+
+def test_load_config_reads_automatic_loss_class_weight_settings(tmp_path: Path) -> None:
+    """Auto weights are configured in YAML and resolved only from the train split."""
+
+    _, load_config = _config_api()
+    assert callable(load_config), "fomo_servo.config.load_config must be available"
+    config_path = tmp_path / "auto_weights.yaml"
+    config_path.write_text(
+        """
+dataset:
+  root: data/aquarium_creature
+  classes: [fish, crab]
+model:
+  input_size: 96
+  output_stride: 8
+loss:
+  name: focal_cross_entropy
+  gamma: 2.0
+  class_weights:
+    mode: auto
+    background_weight: 1.0
+    foreground_base_weight: 25.0
+    class_balance: sqrt_inverse_frequency
+    min_foreground_weight: 12.5
+    max_foreground_weight: 75.0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.loss.class_weight_mode == "auto"
+    assert config.loss.class_weights is None
+    assert config.loss.background_weight == pytest.approx(1.0)
+    assert config.loss.foreground_base_weight == pytest.approx(25.0)
+    assert config.loss.class_balance == "sqrt_inverse_frequency"
+    assert config.loss.min_foreground_weight == pytest.approx(12.5)
+    assert config.loss.max_foreground_weight == pytest.approx(75.0)
+
+
+def test_aug00_none_config_is_fixed_no_augmentation_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The baseline config fixes all training controls and uses manual weight 4."""
+
+    _, load_config = _config_api()
+    assert callable(load_config), "fomo_servo.config.load_config must be available"
+    monkeypatch.setenv("FOMO_DATASET_ROOT", "data/aquarium_pretrain")
+
+    config = load_config(
+        Path(__file__).resolve().parents[1] / "configs" / "experiments" / "aug00_none.yaml"
+    )
+
+    assert config.experiment.name == "aug00_none"
+    assert config.training.epochs == 60
+    assert config.training.early_stopping_patience == 0
+    assert config.loss.class_weight_mode == "manual"
+    assert config.loss.class_weights == (1.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0)
+    assert config.model.input_size == 192
+    assert config.model.output_stride == 8
+    assert config.dataset.train_split == "train"
+    assert config.dataset.validation_split == "val"
 
 
 @pytest.mark.parametrize(

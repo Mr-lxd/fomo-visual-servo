@@ -17,11 +17,24 @@ from .engine import (
     run_training,
     set_random_seed,
 )
+from .class_weights import (
+    AutoClassWeightSettings,
+    ClassTrainingStatistics,
+    ClassWeightError,
+    ResolvedClassWeights,
+    collect_training_heatmap_statistics,
+    resolve_auto_class_weights,
+    resolve_training_class_weights,
+)
 
 __all__ = [
     "TrainingRuntime",
     "TrainingRuntimeError",
     "TrainingError",
+    "AutoClassWeightSettings",
+    "ClassTrainingStatistics",
+    "ClassWeightError",
+    "ResolvedClassWeights",
     "TrainingSummary",
     "EpochMetrics",
     "FOMOBatch",
@@ -32,5 +45,8 @@ __all__ = [
     "move_training_batch",
     "prepare_model",
     "run_training",
+    "collect_training_heatmap_statistics",
+    "resolve_auto_class_weights",
+    "resolve_training_class_weights",
     "set_random_seed",
 ]

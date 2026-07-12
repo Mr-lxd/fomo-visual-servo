@@ -24,6 +24,10 @@ class FOMOClassificationLoss(nn.Module):
             raise LossConfigurationError("unsupported FOMO classification loss")
         if config.gamma < 0:
             raise LossConfigurationError("gamma must be non-negative")
+        if config.class_weights is None:
+            raise LossConfigurationError(
+                "automatic class weights must be resolved from the training dataset before loss construction"
+            )
         self.name = config.name
         self.gamma = config.gamma
         self.register_buffer(

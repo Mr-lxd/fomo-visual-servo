@@ -62,6 +62,7 @@ class TrainingConfig:
     resume: Optional[Path] = None
     early_stopping_patience: int = 0
     early_stopping_min_delta: float = 0.0
+    checkpoint_criterion: str = "grid_f1"
     optimizer: "OptimizerConfig" = field(
         default_factory=lambda: OptimizerConfig(
             name="adamw", learning_rate=0.001, weight_decay=0.0
@@ -78,7 +79,13 @@ class LossConfig:
 
     name: str
     gamma: float
-    class_weights: Tuple[float, ...]
+    class_weights: Optional[Tuple[float, ...]] = None
+    class_weight_mode: str = "manual"
+    background_weight: float = 1.0
+    foreground_base_weight: float = 25.0
+    class_balance: str = "sqrt_inverse_frequency"
+    min_foreground_weight: float = 12.5
+    max_foreground_weight: float = 75.0
 
 
 @dataclass(frozen=True)
@@ -100,6 +107,37 @@ class SchedulerConfig:
 
 
 @dataclass(frozen=True)
+class PostprocessConfig:
+    """YAML-controlled logits postprocessing and target-selection settings."""
+
+    confidence_threshold: float = 0.05
+    class_thresholds: Optional[Tuple[float, ...]] = None
+    component_mode: str = "connected_components"
+    confidence_mode: str = "max"
+    selection_strategy: str = "highest_confidence"
+    max_match_distance_pixels: float = 32.0
+    max_lost_frames: int = 5
+    allowed_class_ids: Optional[Tuple[int, ...]] = None
+
+
+@dataclass(frozen=True)
+class EvaluationConfig:
+    """YAML-controlled centroid matching and validation threshold sweep settings."""
+
+    matching_mode: str = "centroid_in_bbox"
+    max_distance_pixels: float = 32.0
+    threshold_sweep: Tuple[float, ...] = (0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 0.95)
+
+
+@dataclass(frozen=True)
+class ExperimentConfig:
+    """Optional append-only experiment recording settings."""
+
+    name: Optional[str] = None
+    summary_csv: Path = Path("outputs/experiments/experiments_summary.csv")
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     """Validated project configuration with derived FOMO output dimensions."""
 
@@ -107,7 +145,10 @@ class ProjectConfig:
     model: ModelConfig
     loss: LossConfig
     training: TrainingConfig
+    postprocess: PostprocessConfig
+    evaluation: EvaluationConfig
     source_path: Path
+    experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
 
     @property
     def grid_size(self) -> int:
@@ -212,9 +253,86 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             "loss.name must be 'weighted_cross_entropy' or 'focal_cross_entropy'"
         )
     loss_gamma = _optional_nonnegative_float(loss_mapping, "gamma", 2.0, "loss")
-    class_weights = _optional_class_weights(
+    (
+        class_weight_mode,
+        class_weights,
+        background_weight,
+        foreground_base_weight,
+        class_balance,
+        min_foreground_weight,
+        max_foreground_weight,
+    ) = _parse_loss_class_weight_settings(
         loss_mapping,
         expected_count=1 + len(class_names),
+    )
+
+    postprocess_mapping = _optional_mapping(payload, "postprocess")
+    confidence_threshold = _optional_probability(
+        postprocess_mapping, "confidence_threshold", 0.05, "postprocess"
+    )
+    class_thresholds = _optional_class_thresholds(
+        postprocess_mapping, "class_thresholds", class_names, "postprocess"
+    )
+    component_mode = _optional_text(
+        postprocess_mapping, "component_mode", "connected_components", "postprocess"
+    )
+    if component_mode not in {"connected_components", "local_peaks"}:
+        raise ConfigurationError(
+            "postprocess.component_mode must be 'connected_components' or 'local_peaks'"
+        )
+    confidence_mode = _optional_text(
+        postprocess_mapping, "confidence_mode", "max", "postprocess"
+    )
+    if confidence_mode not in {"max", "mean"}:
+        raise ConfigurationError("postprocess.confidence_mode must be 'max' or 'mean'")
+    selection_strategy = _optional_text(
+        postprocess_mapping, "selection_strategy", "highest_confidence", "postprocess"
+    )
+    if selection_strategy not in {
+        "highest_confidence",
+        "largest_component",
+        "nearest_previous",
+    }:
+        raise ConfigurationError(
+            "postprocess.selection_strategy is not a supported target strategy"
+        )
+    max_match_distance_pixels = _optional_nonnegative_float(
+        postprocess_mapping, "max_match_distance_pixels", 32.0, "postprocess"
+    )
+    max_lost_frames = _optional_nonnegative_integer(
+        postprocess_mapping, "max_lost_frames", 5, "postprocess"
+    )
+    allowed_class_ids = _optional_class_ids(
+        postprocess_mapping, "allowed_class_ids", len(class_names), "postprocess"
+    )
+
+    evaluation_mapping = _optional_mapping(payload, "evaluation")
+    matching_mode = _optional_text(
+        evaluation_mapping, "matching_mode", "centroid_in_bbox", "evaluation"
+    )
+    if matching_mode not in {"centroid_in_bbox", "max_distance_pixels"}:
+        raise ConfigurationError(
+            "evaluation.matching_mode must be 'centroid_in_bbox' or 'max_distance_pixels'"
+        )
+    max_distance_pixels = _optional_nonnegative_float(
+        evaluation_mapping, "max_distance_pixels", 32.0, "evaluation"
+    )
+    threshold_sweep = _optional_probability_sequence(
+        evaluation_mapping,
+        "threshold_sweep",
+        (0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 0.95),
+        "evaluation",
+    )
+
+    experiment_mapping = _optional_mapping(payload, "experiment")
+    experiment_name = _optional_nullable_text(
+        experiment_mapping, "name", None, "experiment"
+    )
+    experiment_summary_csv = _optional_path(
+        experiment_mapping,
+        "summary_csv",
+        "outputs/experiments/experiments_summary.csv",
+        "experiment",
     )
 
     training_mapping = _training_mapping(payload)
@@ -244,6 +362,13 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     early_stopping_min_delta = _optional_nonnegative_float(
         training_mapping, "early_stopping_min_delta", 0.0, "training"
     )
+    checkpoint_criterion = _optional_text(
+        training_mapping, "checkpoint_criterion", "grid_f1", "training"
+    )
+    if checkpoint_criterion not in {"grid_f1", "centroid_f1"}:
+        raise ConfigurationError(
+            "training.checkpoint_criterion must be 'grid_f1' or 'centroid_f1'"
+        )
     optimizer_mapping = _optional_mapping(training_mapping, "optimizer")
     optimizer_name = _optional_text(
         optimizer_mapping, "name", "adamw", "training.optimizer"
@@ -292,6 +417,12 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             name=loss_name,
             gamma=loss_gamma,
             class_weights=class_weights,
+            class_weight_mode=class_weight_mode,
+            background_weight=background_weight,
+            foreground_base_weight=foreground_base_weight,
+            class_balance=class_balance,
+            min_foreground_weight=min_foreground_weight,
+            max_foreground_weight=max_foreground_weight,
         ),
         training=TrainingConfig(
             device=device,
@@ -306,6 +437,7 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             resume=resume,
             early_stopping_patience=early_stopping_patience,
             early_stopping_min_delta=early_stopping_min_delta,
+            checkpoint_criterion=checkpoint_criterion,
             optimizer=OptimizerConfig(
                 name=optimizer_name,
                 learning_rate=learning_rate,
@@ -317,7 +449,26 @@ def load_config(path: ConfigPath) -> ProjectConfig:
                 gamma=scheduler_gamma,
             ),
         ),
+        postprocess=PostprocessConfig(
+            confidence_threshold=confidence_threshold,
+            class_thresholds=class_thresholds,
+            component_mode=component_mode,
+            confidence_mode=confidence_mode,
+            selection_strategy=selection_strategy,
+            max_match_distance_pixels=max_match_distance_pixels,
+            max_lost_frames=max_lost_frames,
+            allowed_class_ids=allowed_class_ids,
+        ),
+        evaluation=EvaluationConfig(
+            matching_mode=matching_mode,
+            max_distance_pixels=max_distance_pixels,
+            threshold_sweep=threshold_sweep,
+        ),
         source_path=source_path,
+        experiment=ExperimentConfig(
+            name=experiment_name,
+            summary_csv=experiment_summary_csv,
+        ),
     )
 
 
@@ -422,6 +573,98 @@ def _optional_text(
     return value
 
 
+def _optional_nullable_text(
+    payload: Mapping[str, Any],
+    name: str,
+    default: Optional[str],
+    section: str,
+) -> Optional[str]:
+    """Return an optional non-empty text value or ``None``."""
+
+    value = payload.get(name, default)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigurationError(
+            "{}.{} must be null or a non-empty string".format(section, name)
+        )
+    return value
+
+
+def _optional_probability(
+    payload: Mapping[str, Any], name: str, default: float, section: str
+) -> float:
+    value = payload.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or not 0.0 <= value <= 1.0:
+        raise ConfigurationError("{}.{} must be a finite probability in [0,1]".format(section, name))
+    return float(value)
+
+
+def _optional_probability_sequence(
+    payload: Mapping[str, Any],
+    name: str,
+    default: Sequence[float],
+    section: str,
+) -> Tuple[float, ...]:
+    value = payload.get(name, default)
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or not value:
+        raise ConfigurationError("{}.{} must be a non-empty probability list".format(section, name))
+    return tuple(
+        _optional_probability({"value": item}, "value", 0.0, section)
+        for item in value
+    )
+
+
+def _optional_class_thresholds(
+    payload: Mapping[str, Any],
+    name: str,
+    class_names: Sequence[str],
+    section: str,
+) -> Optional[Tuple[float, ...]]:
+    value = payload.get(name)
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        thresholds = [None] * len(class_names)
+        for raw_key, raw_value in value.items():
+            if isinstance(raw_key, bool) or not isinstance(raw_key, (int, str)):
+                raise ConfigurationError("{}.{} keys must be class IDs or names".format(section, name))
+            if isinstance(raw_key, int):
+                class_id = raw_key
+            else:
+                if raw_key not in class_names:
+                    raise ConfigurationError("unknown class name '{}' in {}.{}".format(raw_key, section, name))
+                class_id = class_names.index(raw_key)
+            if not 0 <= class_id < len(class_names):
+                raise ConfigurationError("{}.{} class ID is outside dataset classes".format(section, name))
+            thresholds[class_id] = _optional_probability({"value": raw_value}, "value", 0.0, section)
+        if any(item is None for item in thresholds):
+            raise ConfigurationError("{}.{} must specify every dataset class".format(section, name))
+        return tuple(float(item) for item in thresholds)
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or len(value) != len(class_names):
+        raise ConfigurationError("{}.{} must contain one value per dataset class".format(section, name))
+    return tuple(
+        _optional_probability({"value": item}, "value", 0.0, section)
+        for item in value
+    )
+
+
+def _optional_class_ids(
+    payload: Mapping[str, Any], name: str, class_count: int, section: str
+) -> Optional[Tuple[int, ...]]:
+    value = payload.get(name)
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ConfigurationError("{}.{} must be a list of class IDs".format(section, name))
+    output = []
+    for index in value:
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < class_count:
+            raise ConfigurationError("{}.{} contains an invalid class ID".format(section, name))
+        output.append(index)
+    return tuple(output)
+
+
 def _optional_positive_float(
     payload: Mapping[str, Any], name: str, default: float, section: str
 ) -> float:
@@ -486,12 +729,81 @@ def _optional_boolean(
     return value
 
 
-def _optional_class_weights(
+def _parse_loss_class_weight_settings(
     payload: Mapping[str, Any], expected_count: int
-) -> Tuple[float, ...]:
-    """Validate background-plus-foreground class weights from the loss YAML block."""
+) -> tuple[str, Optional[Tuple[float, ...]], float, float, str, float, float]:
+    """Parse legacy manual lists or explicit ``manual``/``auto`` loss weighting.
+
+    The legacy form ``class_weights: [background, class_0, ...]`` remains manual.
+    The explicit form is a mapping with ``mode``.  In manual mode it must include
+    ``values``; automatic mode receives its balancing parameters in the same
+    mapping and derives foreground weights from the training heatmaps.
+    """
 
     raw_weights = payload.get("class_weights", [1.0] * expected_count)
+    defaults = (1.0, 25.0, "sqrt_inverse_frequency", 12.5, 75.0)
+    if not isinstance(raw_weights, Mapping):
+        return (
+            "manual",
+            _validate_class_weight_sequence(raw_weights, expected_count),
+            *defaults,
+        )
+
+    mode = _optional_text(raw_weights, "mode", "manual", "loss.class_weights")
+    if mode == "manual":
+        if "values" not in raw_weights:
+            raise ConfigurationError(
+                "loss.class_weights.values is required when loss.class_weights.mode is 'manual'"
+            )
+        return (
+            "manual",
+            _validate_class_weight_sequence(raw_weights["values"], expected_count),
+            *defaults,
+        )
+    if mode != "auto":
+        raise ConfigurationError(
+            "loss.class_weights.mode must be 'manual' or 'auto'"
+        )
+
+    background_weight = _optional_positive_float(
+        raw_weights, "background_weight", 1.0, "loss.class_weights"
+    )
+    foreground_base_weight = _optional_positive_float(
+        raw_weights, "foreground_base_weight", 25.0, "loss.class_weights"
+    )
+    class_balance = _optional_text(
+        raw_weights, "class_balance", "sqrt_inverse_frequency", "loss.class_weights"
+    )
+    if class_balance != "sqrt_inverse_frequency":
+        raise ConfigurationError(
+            "loss.class_weights.class_balance must be 'sqrt_inverse_frequency'"
+        )
+    min_foreground_weight = _optional_positive_float(
+        raw_weights, "min_foreground_weight", 12.5, "loss.class_weights"
+    )
+    max_foreground_weight = _optional_positive_float(
+        raw_weights, "max_foreground_weight", 75.0, "loss.class_weights"
+    )
+    if min_foreground_weight > max_foreground_weight:
+        raise ConfigurationError(
+            "loss.class_weights.min_foreground_weight must not exceed max_foreground_weight"
+        )
+    return (
+        "auto",
+        None,
+        background_weight,
+        foreground_base_weight,
+        class_balance,
+        min_foreground_weight,
+        max_foreground_weight,
+    )
+
+
+def _validate_class_weight_sequence(
+    raw_weights: Any, expected_count: int
+) -> Tuple[float, ...]:
+    """Validate a background-plus-foreground manual weight sequence."""
+
     if not isinstance(raw_weights, Sequence) or isinstance(raw_weights, (str, bytes)):
         raise ConfigurationError("loss.class_weights must be a list of positive numbers")
     if len(raw_weights) != expected_count:
