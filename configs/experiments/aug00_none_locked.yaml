@@ -1,5 +1,5 @@
 project:
-  name: aug00_none
+  name: aug00_none_locked
 
 dataset:
   root: "${FOMO_DATASET_ROOT}"
@@ -65,7 +65,7 @@ training:
   batch_size: 8
   epochs: 60
   seed: 42
-  output_dir: outputs/experiments/aug00_none
+  output_dir: outputs/experiments/aug00_none_locked
   resume: null
   early_stopping_patience: 0
   early_stopping_min_delta: 0.0
@@ -84,5 +84,5 @@ export:
   input_size: 192
 
 experiment:
-  name: aug00_none
+  name: aug00_none_locked
   summary_csv: outputs/experiments/experiments_summary.csv

@@ -159,7 +159,9 @@ training:
     gamma: 0.5
 ```
 
-每个 epoch 会记录 `train_loss`、`val_loss`、前景网格级 micro `precision`、`recall` 和 `F1` 到 `<output_dir>/history.csv`。始终保存 `<output_dir>/last.pt`，仅当 validation F1 严格提升时保存 `<output_dir>/best_val_f1.pt`。checkpoint 含模型、优化器、scheduler、AMP scaler、随机状态和 early stopping 状态，因此可从 `last.pt` 继续训练。
+每个 epoch 会记录 `train_loss`、`val_loss`、网格级指标和固定阈值下的 centroid 指标到 `<output_dir>/history.csv`。始终保存 `<output_dir>/last.pt`，并分别按固定 `evaluation.checkpoint_threshold` 保存 `best_grid_f1.pt` 与 `best_centroid_f1.pt`；`best_val_f1.pt` 是当前 `training.checkpoint_criterion` 对应文件的兼容别名。checkpoint 含模型、优化器、scheduler、AMP scaler、随机状态、选择指标和选择阈值，因此可从 `last.pt` 继续训练。
+
+推理阈值与 checkpoint 选择阈值严格分离：`postprocess.inference_threshold` 供图片/视频推理默认使用，`evaluation.checkpoint_threshold` 只用于每个 epoch 的 checkpoint 选择。`evaluation.threshold_sweep` 只在训练结束后评价最终选中的 checkpoint，不参与 epoch 级选择。旧配置中的 `postprocess.confidence_threshold` 仍可加载，但会发出弃用警告，并且只映射为推理阈值。
 
 ## Roboflow YOLO 数据集
 
@@ -206,7 +208,7 @@ python scripts/predict_image.py `
   --output-json outputs/prediction.json
 ```
 
-完整 validation 会使用与推理相同的后处理，并在配置的 validation split 上执行 confidence threshold sweep：
+完整 validation 会使用与推理相同的后处理，并在配置的 validation split 上执行 confidence threshold sweep；训练期 checkpoint 仍只使用固定阈值：
 
 ```powershell
 python scripts/evaluate.py `

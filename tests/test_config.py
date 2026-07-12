@@ -223,6 +223,36 @@ def test_aug00_none_config_is_fixed_no_augmentation_baseline(
     assert config.model.output_stride == 8
     assert config.dataset.train_split == "train"
     assert config.dataset.validation_split == "val"
+    assert config.postprocess.inference_threshold == pytest.approx(0.5)
+    assert config.evaluation.checkpoint_threshold == pytest.approx(0.5)
+    assert config.evaluation.threshold_sweep_enabled is True
+
+
+def test_aug00_none_locked_config_keeps_the_same_fixed_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The locked baseline has no augmentation and separates both thresholds."""
+
+    _, load_config = _config_api()
+    assert callable(load_config), "fomo_servo.config.load_config must be available"
+    monkeypatch.setenv("FOMO_DATASET_ROOT", "data/aquarium_pretrain")
+
+    config = load_config(
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "experiments"
+        / "aug00_none_locked.yaml"
+    )
+
+    assert config.experiment.name == "aug00_none_locked"
+    assert config.training.output_dir.as_posix().endswith(
+        "outputs/experiments/aug00_none_locked"
+    )
+    assert config.training.epochs == 60
+    assert config.training.early_stopping_patience == 0
+    assert config.loss.class_weights == (1.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0)
+    assert config.postprocess.inference_threshold == pytest.approx(0.5)
+    assert config.evaluation.checkpoint_threshold == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize(

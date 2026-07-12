@@ -119,6 +119,11 @@ class TrainingSummary:
     class_weights: tuple[float, ...] = ()
     class_statistics: tuple[ClassTrainingStatistics, ...] = ()
     best_epoch: int = 0
+    best_grid_epoch: int = 0
+    best_centroid_epoch: int = 0
+    checkpoint_threshold: float = 0.5
+    final_sweep_best_threshold: float | None = None
+    best_val_f1_alias_target: str = "best_grid_f1.pt"
     total_training_time_seconds: float = 0.0
 
 
@@ -299,6 +304,7 @@ def run_training(
             stride=config.model.output_stride,
             postprocess_config=config.postprocess,
             evaluation_config=config.evaluation,
+            checkpoint_threshold=config.evaluation.checkpoint_threshold,
         )
         learning_rate = float(optimizer.param_groups[0]["lr"])
         if scheduler is not None:
@@ -326,7 +332,7 @@ def run_training(
         if centroid_improved:
             best_centroid_f1 = validation.centroid_f1
             best_centroid_epoch = epoch
-        checkpoint = _checkpoint_payload(
+        checkpoint_arguments = dict(
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
@@ -341,14 +347,49 @@ def run_training(
             early_stopping_bad_epochs=bad_epochs,
             checkpoint_criterion=config.training.checkpoint_criterion,
             resolved_weights=resolved_weights,
+            validation=validation,
+            selection_threshold=config.evaluation.checkpoint_threshold,
+            best_val_f1_alias_target=(
+                "best_grid_f1.pt"
+                if config.training.checkpoint_criterion == "grid_f1"
+                else "best_centroid_f1.pt"
+            ),
         )
-        torch.save(checkpoint, output_dir / "last.pt")
+        torch.save(
+            _checkpoint_payload(
+                **checkpoint_arguments,
+                checkpoint_type="last",
+                selection_metric="last",
+            ),
+            output_dir / "last.pt",
+        )
         if grid_improved:
-            torch.save(checkpoint, output_dir / "best_grid_f1.pt")
+            torch.save(
+                _checkpoint_payload(
+                    **checkpoint_arguments,
+                    checkpoint_type="best_grid_f1",
+                    selection_metric="grid_f1",
+                ),
+                output_dir / "best_grid_f1.pt",
+            )
         if centroid_improved:
-            torch.save(checkpoint, output_dir / "best_centroid_f1.pt")
+            torch.save(
+                _checkpoint_payload(
+                    **checkpoint_arguments,
+                    checkpoint_type="best_centroid_f1",
+                    selection_metric="centroid_f1",
+                ),
+                output_dir / "best_centroid_f1.pt",
+            )
         if improved:
-            torch.save(checkpoint, output_dir / "best_val_f1.pt")
+            torch.save(
+                _checkpoint_payload(
+                    **checkpoint_arguments,
+                    checkpoint_type="best_val_f1_alias",
+                    selection_metric=config.training.checkpoint_criterion,
+                ),
+                output_dir / "best_val_f1.pt",
+            )
         _append_history(
             history_path,
             epoch=epoch,
@@ -379,11 +420,18 @@ def run_training(
         class_weights=resolved_weights.weights,
         class_statistics=resolved_weights.statistics,
         best_epoch=best_epoch,
+        best_grid_epoch=best_grid_epoch,
+        best_centroid_epoch=best_centroid_epoch,
+        checkpoint_threshold=config.evaluation.checkpoint_threshold,
+        best_val_f1_alias_target=(
+            "best_grid_f1.pt"
+            if config.training.checkpoint_criterion == "grid_f1"
+            else "best_centroid_f1.pt"
+        ),
         total_training_time_seconds=perf_counter() - training_started,
     )
-    _write_training_summary(output_dir / "training_summary.json", summary)
     if config.experiment.name is not None:
-        _record_experiment(
+        final_sweep_best_threshold = _record_experiment(
             config=config,
             model=model,
             device=runtime.device,
@@ -392,6 +440,10 @@ def run_training(
             git_dirty=git_dirty,
             git_diff_sha256=git_diff_sha256,
         )
+        summary = replace(
+            summary, final_sweep_best_threshold=final_sweep_best_threshold
+        )
+    _write_training_summary(output_dir / "training_summary.json", summary)
     return summary
 
 
@@ -440,8 +492,9 @@ def validate_one_epoch(
     stride: int,
     postprocess_config: PostprocessConfig,
     evaluation_config: EvaluationConfig,
+    checkpoint_threshold: float,
 ) -> EpochMetrics:
-    """Run validation and calculate grid plus postprocessed centroid metrics."""
+    """Run validation using the fixed checkpoint threshold for epoch metrics."""
 
     model.eval()
     total_loss = 0.0
@@ -474,7 +527,7 @@ def validate_one_epoch(
                 class_names=class_names,
                 stride=stride,
                 transforms=batch.transforms,
-                confidence_threshold=postprocess_config.confidence_threshold,
+                confidence_threshold=checkpoint_threshold,
                 class_thresholds=postprocess_config.class_thresholds,
                 component_mode=postprocess_config.component_mode,
                 confidence_mode=postprocess_config.confidence_mode,
@@ -646,7 +699,7 @@ def _record_experiment(
     summary: TrainingSummary,
     git_dirty: bool,
     git_diff_sha256: str,
-) -> None:
+) -> float:
     """Evaluate the selected checkpoint and append one reproducible experiment row."""
 
     if config.experiment.name is None:
@@ -707,6 +760,23 @@ def _record_experiment(
             "mean_count_bias": result.mean_count_bias,
             "count_mae": result.mean_absolute_count_error,
             "best_epoch": summary.best_epoch,
+            "best_grid_epoch": summary.best_grid_epoch,
+            "best_centroid_epoch": summary.best_centroid_epoch,
+            "checkpoint_threshold": config.evaluation.checkpoint_threshold,
+            "final_sweep_best_threshold": validation_report.best_threshold,
+            "best_val_f1_alias_target": summary.best_val_f1_alias_target,
+            "checkpoint_type": checkpoint.get("checkpoint_type", "legacy"),
+            "selection_metric": checkpoint.get(
+                "selection_metric", config.training.checkpoint_criterion
+            ),
+            "selection_threshold": checkpoint.get(
+                "selection_threshold", config.evaluation.checkpoint_threshold
+            ),
+            "checkpoint_epoch": checkpoint.get("epoch"),
+            "checkpoint_grid_f1": checkpoint.get("grid_f1"),
+            "checkpoint_centroid_precision": checkpoint.get("centroid_precision"),
+            "checkpoint_centroid_recall": checkpoint.get("centroid_recall"),
+            "checkpoint_centroid_f1": checkpoint.get("centroid_f1"),
             "total_training_time_seconds": summary.total_training_time_seconds,
             "validation_report": validation_payload,
         }
@@ -732,6 +802,7 @@ def _record_experiment(
                 "total_training_time_seconds": summary.total_training_time_seconds,
             },
         )
+        return validation_report.best_threshold
     except ExperimentMetadataError as error:
         raise TrainingError("unable to record experiment metadata: {}".format(error)) from error
     except (OSError, RuntimeError, ValueError, TypeError) as error:
@@ -749,6 +820,11 @@ def _write_training_summary(summary_path: Path, summary: TrainingSummary) -> Non
         "best_grid_f1": summary.best_grid_f1,
         "best_centroid_f1": summary.best_centroid_f1,
         "best_epoch": summary.best_epoch,
+        "best_grid_epoch": summary.best_grid_epoch,
+        "best_centroid_epoch": summary.best_centroid_epoch,
+        "checkpoint_threshold": summary.checkpoint_threshold,
+        "final_sweep_best_threshold": summary.final_sweep_best_threshold,
+        "best_val_f1_alias_target": summary.best_val_f1_alias_target,
         "total_training_time_seconds": summary.total_training_time_seconds,
         "stopped_early": summary.stopped_early,
         "device": str(summary.device),
@@ -856,8 +932,13 @@ def _checkpoint_payload(
     early_stopping_bad_epochs: int,
     checkpoint_criterion: str,
     resolved_weights: ResolvedClassWeights,
+    validation: EpochMetrics,
+    checkpoint_type: str,
+    selection_metric: str,
+    selection_threshold: float,
+    best_val_f1_alias_target: str,
 ) -> dict[str, Any]:
-    """Capture state needed to resume the same model, optimizer, schedule, and RNGs."""
+    """Capture resume state and explicit fixed-threshold selection metadata."""
 
     return {
         "model_state": model.state_dict(),
@@ -865,6 +946,14 @@ def _checkpoint_payload(
         "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
         "scaler_state": scaler.state_dict(),
         "epoch": epoch,
+        "checkpoint_type": checkpoint_type,
+        "selection_metric": selection_metric,
+        "selection_threshold": selection_threshold,
+        "grid_f1": validation.grid_f1,
+        "centroid_precision": validation.centroid_precision,
+        "centroid_recall": validation.centroid_recall,
+        "centroid_f1": validation.centroid_f1,
+        "best_val_f1_alias_target": best_val_f1_alias_target,
         "best_val_f1": best_val_f1,
         "best_grid_f1": best_grid_f1,
         "best_centroid_f1": best_centroid_f1,

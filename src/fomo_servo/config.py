@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import warnings
 from dataclasses import dataclass, field
 from math import isfinite
 from pathlib import Path
@@ -110,7 +111,12 @@ class SchedulerConfig:
 class PostprocessConfig:
     """YAML-controlled logits postprocessing and target-selection settings."""
 
-    confidence_threshold: float = 0.05
+    inference_threshold: Optional[float] = None
+    """Default probability threshold used by image/video inference."""
+
+    # Retained only so callers constructing the old dataclass directly keep
+    # working.  YAML loading warns when this legacy field is used.
+    confidence_threshold: Optional[float] = None
     class_thresholds: Optional[Tuple[float, ...]] = None
     component_mode: str = "connected_components"
     confidence_mode: str = "max"
@@ -119,6 +125,24 @@ class PostprocessConfig:
     max_lost_frames: int = 5
     allowed_class_ids: Optional[Tuple[int, ...]] = None
 
+    def __post_init__(self) -> None:
+        """Resolve the legacy constructor keyword without conflating its purpose."""
+
+        if (
+            self.inference_threshold is not None
+            and self.confidence_threshold is not None
+            and self.inference_threshold != self.confidence_threshold
+        ):
+            raise ValueError(
+                "inference_threshold and legacy confidence_threshold cannot both be set"
+            )
+        if self.inference_threshold is None:
+            object.__setattr__(
+                self,
+                "inference_threshold",
+                0.05 if self.confidence_threshold is None else self.confidence_threshold,
+            )
+
 
 @dataclass(frozen=True)
 class EvaluationConfig:
@@ -126,7 +150,14 @@ class EvaluationConfig:
 
     matching_mode: str = "centroid_in_bbox"
     max_distance_pixels: float = 32.0
-    threshold_sweep: Tuple[float, ...] = (0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 0.95)
+    checkpoint_threshold: float = 0.5
+    threshold_sweep_enabled: bool = True
+    threshold_sweep_minimum: float = 0.05
+    threshold_sweep_maximum: float = 0.95
+    threshold_sweep_step: float = 0.05
+    threshold_sweep: Tuple[float, ...] = tuple(
+        round(0.05 + index * 0.05, 10) for index in range(19)
+    )
 
 
 @dataclass(frozen=True)
@@ -267,8 +298,30 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     )
 
     postprocess_mapping = _optional_mapping(payload, "postprocess")
-    confidence_threshold = _optional_probability(
-        postprocess_mapping, "confidence_threshold", 0.05, "postprocess"
+    has_inference_threshold = "inference_threshold" in postprocess_mapping
+    has_legacy_threshold = "confidence_threshold" in postprocess_mapping
+    if has_inference_threshold and has_legacy_threshold:
+        raise ConfigurationError(
+            "postprocess.inference_threshold and deprecated "
+            "postprocess.confidence_threshold must not both be provided"
+        )
+    legacy_confidence_threshold: Optional[float] = None
+    if has_legacy_threshold:
+        warnings.warn(
+            "postprocess.confidence_threshold is deprecated; use "
+            "postprocess.inference_threshold. It controls inference only; "
+            "evaluation.checkpoint_threshold is independent.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        legacy_confidence_threshold = _optional_probability(
+            postprocess_mapping, "confidence_threshold", 0.05, "postprocess"
+        )
+    inference_threshold = _optional_probability(
+        postprocess_mapping,
+        "inference_threshold",
+        0.05 if legacy_confidence_threshold is None else legacy_confidence_threshold,
+        "postprocess",
     )
     class_thresholds = _optional_class_thresholds(
         postprocess_mapping, "class_thresholds", class_names, "postprocess"
@@ -317,12 +370,49 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     max_distance_pixels = _optional_nonnegative_float(
         evaluation_mapping, "max_distance_pixels", 32.0, "evaluation"
     )
-    threshold_sweep = _optional_probability_sequence(
-        evaluation_mapping,
-        "threshold_sweep",
-        (0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 0.95),
-        "evaluation",
+    checkpoint_threshold = _optional_probability(
+        evaluation_mapping, "checkpoint_threshold", 0.5, "evaluation"
     )
+    threshold_sweep_value = evaluation_mapping.get("threshold_sweep")
+    if isinstance(threshold_sweep_value, Mapping):
+        threshold_sweep_enabled = _optional_boolean(
+            threshold_sweep_value, "enabled", True, "evaluation.threshold_sweep"
+        )
+        threshold_sweep_minimum = _optional_probability(
+            threshold_sweep_value, "minimum", 0.05, "evaluation.threshold_sweep"
+        )
+        threshold_sweep_maximum = _optional_probability(
+            threshold_sweep_value, "maximum", 0.95, "evaluation.threshold_sweep"
+        )
+        threshold_sweep_step = _optional_positive_float(
+            threshold_sweep_value, "step", 0.05, "evaluation.threshold_sweep"
+        )
+        if threshold_sweep_minimum > threshold_sweep_maximum:
+            raise ConfigurationError(
+                "evaluation.threshold_sweep.minimum must not exceed maximum"
+            )
+        threshold_sweep = _build_threshold_sweep(
+            threshold_sweep_minimum,
+            threshold_sweep_maximum,
+            threshold_sweep_step,
+            checkpoint_threshold,
+            enabled=threshold_sweep_enabled,
+        )
+    else:
+        threshold_sweep = _optional_probability_sequence(
+            evaluation_mapping,
+            "threshold_sweep",
+            tuple(round(0.05 + index * 0.05, 10) for index in range(19)),
+            "evaluation",
+        )
+        threshold_sweep_enabled = True
+        threshold_sweep_minimum = threshold_sweep[0]
+        threshold_sweep_maximum = threshold_sweep[-1]
+        threshold_sweep_step = (
+            threshold_sweep[1] - threshold_sweep[0]
+            if len(threshold_sweep) > 1
+            else 0.05
+        )
 
     experiment_mapping = _optional_mapping(payload, "experiment")
     experiment_name = _optional_nullable_text(
@@ -450,7 +540,8 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             ),
         ),
         postprocess=PostprocessConfig(
-            confidence_threshold=confidence_threshold,
+            inference_threshold=inference_threshold,
+            confidence_threshold=legacy_confidence_threshold,
             class_thresholds=class_thresholds,
             component_mode=component_mode,
             confidence_mode=confidence_mode,
@@ -462,6 +553,11 @@ def load_config(path: ConfigPath) -> ProjectConfig:
         evaluation=EvaluationConfig(
             matching_mode=matching_mode,
             max_distance_pixels=max_distance_pixels,
+            checkpoint_threshold=checkpoint_threshold,
+            threshold_sweep_enabled=threshold_sweep_enabled,
+            threshold_sweep_minimum=threshold_sweep_minimum,
+            threshold_sweep_maximum=threshold_sweep_maximum,
+            threshold_sweep_step=threshold_sweep_step,
             threshold_sweep=threshold_sweep,
         ),
         source_path=source_path,
@@ -613,6 +709,33 @@ def _optional_probability_sequence(
         _optional_probability({"value": item}, "value", 0.0, section)
         for item in value
     )
+
+
+def _build_threshold_sweep(
+    minimum: float,
+    maximum: float,
+    step: float,
+    checkpoint_threshold: float,
+    *,
+    enabled: bool,
+) -> Tuple[float, ...]:
+    """Build deterministic inclusive sweep values from YAML range settings."""
+
+    if not enabled:
+        # A disabled sweep still leaves a valid final report at the locked
+        # checkpoint threshold, but it cannot select a different threshold.
+        return (float(checkpoint_threshold),)
+    values = []
+    current = float(minimum)
+    tolerance = max(1e-10, abs(step) * 1e-8)
+    while current <= maximum + tolerance:
+        values.append(round(min(current, maximum), 10))
+        current += step
+    if not values:
+        values.append(float(minimum))
+    if values[-1] < maximum - tolerance:
+        values.append(float(maximum))
+    return tuple(values)
 
 
 def _optional_class_thresholds(

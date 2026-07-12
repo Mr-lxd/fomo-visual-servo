@@ -20,6 +20,13 @@ class _FixedLogitModel(nn.Module):
         return logits
 
 
+class _ThresholdBoundaryModel(nn.Module):
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        """Return equal foreground/background logits, so probability is exactly 0.5."""
+
+        return torch.zeros(images.shape[0], 2, 12, 12, device=images.device)
+
+
 def test_predict_rgb_image_preserves_letterbox_and_returns_original_centroid(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -44,6 +51,39 @@ model:
     assert len(prediction.detections) == 1
     assert 0.0 <= prediction.detections[0].original_x <= 95.0
     assert 0.0 <= prediction.detections[0].original_y <= 47.0
+
+
+def test_predict_rgb_image_defaults_to_inference_threshold(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+dataset:
+  root: data
+  classes: [creature]
+model:
+  input_size: 96
+  output_stride: 8
+postprocess:
+  inference_threshold: 0.6
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    image = np.zeros((96, 96, 3), dtype=np.uint8)
+
+    default_prediction = predict_rgb_image(
+        _ThresholdBoundaryModel(), image, config=config, device=torch.device("cpu")
+    )
+    explicit_prediction = predict_rgb_image(
+        _ThresholdBoundaryModel(),
+        image,
+        config=config,
+        device=torch.device("cpu"),
+        confidence_threshold=0.5,
+    )
+
+    assert default_prediction.detections == ()
+    assert len(explicit_prediction.detections) == 1
 
 
 def test_detection_and_video_csv_schemas_are_stable() -> None:

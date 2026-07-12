@@ -77,7 +77,7 @@ def predict_rgb_image(
     with torch.no_grad():
         logits = model(tensor)
     threshold = (
-        config.postprocess.confidence_threshold
+        config.postprocess.inference_threshold
         if confidence_threshold is None
         else confidence_threshold
     )

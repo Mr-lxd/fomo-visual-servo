@@ -118,7 +118,7 @@ def evaluate_logit_collection(
                 class_names=class_names,
                 stride=stride,
                 transforms=(transform,),
-                confidence_threshold=postprocess_config.confidence_threshold,
+                confidence_threshold=postprocess_config.inference_threshold,
                 class_thresholds=postprocess_config.class_thresholds,
                 component_mode=postprocess_config.component_mode,
                 confidence_mode=postprocess_config.confidence_mode,

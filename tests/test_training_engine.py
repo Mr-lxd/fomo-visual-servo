@@ -158,6 +158,10 @@ def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path)
     assert best_centroid_checkpoint.is_file()
     assert summary_path.is_file()
     checkpoint_payload = torch.load(last_checkpoint, map_location="cpu", weights_only=False)
+    assert checkpoint_payload["checkpoint_type"] == "last"
+    assert checkpoint_payload["selection_metric"] == "last"
+    assert checkpoint_payload["selection_threshold"] == pytest.approx(0.5)
+    assert checkpoint_payload["centroid_f1"] >= 0.0
     assert checkpoint_payload["class_weight_mode"] == "manual"
     assert checkpoint_payload["class_weights"] == [1.0, 3.0]
     assert len(checkpoint_payload["class_statistics"]) == 1
@@ -165,6 +169,10 @@ def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path)
     assert training_summary["class_weight_mode"] == "manual"
     assert training_summary["class_weights"] == [1.0, 3.0]
     assert len(training_summary["class_statistics"]) == 1
+    assert training_summary["best_grid_epoch"] >= 1
+    assert training_summary["best_centroid_epoch"] >= 1
+    assert training_summary["checkpoint_threshold"] == pytest.approx(0.5)
+    assert training_summary["best_val_f1_alias_target"] == "best_grid_f1.pt"
     with history_path.open("r", newline="", encoding="utf-8") as history_file:
         first_rows = list(csv.DictReader(history_file))
     assert len(first_rows) == 2
