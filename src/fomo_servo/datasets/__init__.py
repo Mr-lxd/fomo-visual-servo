@@ -8,6 +8,7 @@ from .augmentation import (
     ColorJitterFactors,
     ColorJitterMetadata,
     apply_color_jitter,
+    flip_boxes_horizontally,
 )
 from .heatmap import (
     GridCentroid,
@@ -46,6 +47,7 @@ __all__ = [
     "YoloLabelError",
     "collate_fomo_samples",
     "apply_color_jitter",
+    "flip_boxes_horizontally",
     "decode_class_index_heatmap",
     "generate_fomo_heatmap",
     "parse_yolo_label_file",

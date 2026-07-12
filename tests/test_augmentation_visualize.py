@@ -44,6 +44,49 @@ augmentation:
     return path
 
 
+def _write_hflip_visualization_config(path: Path) -> Path:
+    """Write an aug02-like config for the synthetic geometric visualization test."""
+
+    path.write_text(
+        f"""
+dataset:
+  root: "{(ROOT / 'tests/fixtures/yolo_micro').as_posix()}"
+  train_split: train
+  validation_split: val
+  classes: [fish, crab]
+  class_mode: preserve
+model:
+  input_size: 96
+  output_stride: 8
+training:
+  seed: 42
+augmentation:
+  enabled: true
+  color_jitter:
+    enabled: true
+    probability: 1.0
+    brightness: 0.2
+    contrast: 0.2
+    saturation: 0.2
+    hue: 0.02
+  horizontal_flip:
+    enabled: true
+    probability: 0.5
+  gaussian_blur:
+    enabled: false
+    probability: 0.0
+  gaussian_noise:
+    enabled: false
+    probability: 0.0
+  affine:
+    enabled: false
+    probability: 0.0
+""".lstrip(),
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_visualize_augmentations_writes_fixture_panel(tmp_path: Path) -> None:
     """The future visualization entry point must consume no-op dataset outputs."""
 
@@ -112,3 +155,46 @@ def test_visualize_augmentations_writes_color_contact_sheet_and_json(
     records = json.loads(samples_json.read_text(encoding="utf-8"))
     assert len(records) >= 2 * 8
     assert all("brightness_factor" in record for record in records)
+
+
+def test_visualize_augmentations_writes_hflip_contact_sheet_and_geometry_json(
+    tmp_path: Path,
+) -> None:
+    """The aug02 mode emits forced-flip panels and original/transformed geometry."""
+
+    output_dir = tmp_path / "hflip_visualization"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/visualize_augmentations.py",
+            "--config",
+            str(_write_hflip_visualization_config(tmp_path / "aug02.yaml")),
+            "--dataset-root",
+            "tests/fixtures/yolo_micro",
+            "--split",
+            "train",
+            "--num-images",
+            "2",
+            "--input-size",
+            "96",
+            "--output-dir",
+            str(output_dir),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    contact_sheet = output_dir / "horizontal_flip_contact_sheet.jpg"
+    samples_json = output_dir / "horizontal_flip_samples.json"
+    assert contact_sheet.is_file()
+    assert samples_json.is_file()
+    records = json.loads(samples_json.read_text(encoding="utf-8"))
+    assert len(records) == 2 * 6
+    forced = [record for record in records if record["case"] == "forced_flip"]
+    assert len(forced) == 2
+    assert all(record["horizontal_flip_applied"] for record in forced)
+    assert all("original_boxes" in record for record in records)
+    assert all("flipped_centroids" in record for record in records)

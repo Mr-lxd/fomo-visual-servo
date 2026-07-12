@@ -63,6 +63,7 @@ class ColorJitterMetadata:
     contrast_factor: float = 1.0
     saturation_factor: float = 1.0
     hue_shift: float = 0.0
+    horizontal_flip_applied: bool = False
 
     @classmethod
     def neutral(cls) -> "ColorJitterMetadata":
@@ -129,8 +130,47 @@ def apply_color_jitter(
     return np.rint(rgb * 255.0).astype(image.dtype, copy=False)
 
 
+def flip_boxes_horizontally(
+    boxes: Sequence[Any], image_width: float
+) -> tuple[Any, ...]:
+    """Mirror continuous xyxy boxes across an image of width ``W``.
+
+    The project uses continuous pixel coordinates, so the exact mapping is
+    ``x_min' = W - x_max`` and ``x_max' = W - x_min``. This deliberately uses
+    ``W`` rather than ``W-1`` and leaves y coordinates, dimensions, order, and
+    class IDs unchanged.
+    """
+
+    if (
+        isinstance(image_width, bool)
+        or not isinstance(image_width, (int, float))
+        or not isfinite(image_width)
+        or image_width <= 0.0
+    ):
+        raise ValueError("image_width must be a finite positive number")
+    if not isinstance(boxes, Sequence):
+        raise TypeError("boxes must be a sequence")
+    flipped = []
+    for box in boxes:
+        try:
+            flipped.append(
+                type(box)(
+                    box.foreground_class_id,
+                    image_width - box.x_max,
+                    box.y_min,
+                    image_width - box.x_min,
+                    box.y_max,
+                )
+            )
+        except AttributeError as error:
+            raise TypeError(
+                "boxes must contain objects with foreground_class_id and xyxy fields"
+            ) from error
+    return tuple(flipped)
+
+
 class AugmentationPipeline:
-    """Apply aug01 color jitter only on train samples before letterbox."""
+    """Apply configured train-only color jitter and horizontal flip."""
 
     def __init__(self, config: AugmentationConfig, *, is_train: bool) -> None:
         if not isinstance(config, AugmentationConfig):
@@ -152,16 +192,17 @@ class AugmentationPipeline:
         boxes: Sequence[Any],
         rng: Optional[np.random.Generator] = None,
     ) -> AugmentationResult:
-        """Apply configured color jitter to RGB image/bboxes before letterbox.
+        """Apply configured geometric/color transforms before letterbox.
 
         Args:
             image: Original RGB ``uint8 [H,W,3]`` image.
-            boxes: Original-image pixel-coordinate bbox objects, unchanged here.
+            boxes: Original-image pixel-coordinate bbox objects.
             rng: Explicit ``numpy.random.Generator`` used for probability and
                 factor sampling; no global RNG is consulted.
 
         Returns:
-            ``AugmentationResult`` with RGB ``uint8 [H,W,3]`` and unchanged boxes.
+            ``AugmentationResult`` with RGB ``uint8 [H,W,3]`` and transformed
+            original-image boxes.
 
         Raises:
             AugmentationNotImplementedError: If a non-color augmentation is enabled.
@@ -174,44 +215,61 @@ class AugmentationPipeline:
             return _no_op_result(image, boxes)
         if _non_color_operation_enabled(self.config):
             raise AugmentationNotImplementedError(
-                "only color_jitter is implemented in aug01_color"
+                "only color_jitter and horizontal_flip are implemented in aug02_color_hflip"
             )
         color_config = self.config.color_jitter
-        if not color_config.enabled or _color_parameters_are_neutral(color_config):
-            return _no_op_result(image, boxes)
-        if color_config.probability <= 0.0:
+        flip_config = self.config.horizontal_flip
+        color_active = (
+            color_config.enabled
+            and not _color_parameters_are_neutral(color_config)
+            and color_config.probability > 0.0
+        )
+        flip_active = flip_config.enabled and flip_config.probability > 0.0
+        if not color_active and not flip_active:
             return _no_op_result(image, boxes)
         if not isinstance(rng, np.random.Generator):
             raise TypeError(
-                "an explicit numpy.random.Generator is required for color jitter"
+                "an explicit numpy.random.Generator is required for augmentation"
             )
 
-        if float(rng.random()) >= color_config.probability:
-            return _no_op_result(image, boxes)
-        factors = ColorJitterFactors(
-            brightness_factor=float(
-                rng.uniform(1.0 - color_config.brightness, 1.0 + color_config.brightness)
-            ),
-            contrast_factor=float(
-                rng.uniform(1.0 - color_config.contrast, 1.0 + color_config.contrast)
-            ),
-            saturation_factor=float(
-                rng.uniform(1.0 - color_config.saturation, 1.0 + color_config.saturation)
-            ),
-            hue_shift=float(rng.uniform(-color_config.hue, color_config.hue)),
-        )
-        jittered = apply_color_jitter(image, factors)
+        augmented_image = image.copy()
+        augmented_boxes = tuple(boxes)
+        factors = ColorJitterFactors.neutral()
+        color_applied = False
+        flip_applied = False
+        if color_active and float(rng.random()) < color_config.probability:
+            factors = ColorJitterFactors(
+                brightness_factor=float(
+                    rng.uniform(1.0 - color_config.brightness, 1.0 + color_config.brightness)
+                ),
+                contrast_factor=float(
+                    rng.uniform(1.0 - color_config.contrast, 1.0 + color_config.contrast)
+                ),
+                saturation_factor=float(
+                    rng.uniform(1.0 - color_config.saturation, 1.0 + color_config.saturation)
+                ),
+                hue_shift=float(rng.uniform(-color_config.hue, color_config.hue)),
+            )
+            augmented_image = apply_color_jitter(augmented_image, factors)
+            color_applied = True
+        if flip_active and float(rng.random()) < flip_config.probability:
+            augmented_image = np.ascontiguousarray(augmented_image[:, ::-1, :])
+            augmented_boxes = flip_boxes_horizontally(
+                augmented_boxes, augmented_image.shape[1]
+            )
+            flip_applied = True
         metadata = ColorJitterMetadata(
-            applied=True,
+            applied=color_applied or flip_applied,
             brightness_factor=factors.brightness_factor,
             contrast_factor=factors.contrast_factor,
             saturation_factor=factors.saturation_factor,
             hue_shift=factors.hue_shift,
+            horizontal_flip_applied=flip_applied,
         )
         return AugmentationResult(
-            image=jittered,
-            boxes=tuple(boxes),
-            applied=True,
+            image=augmented_image,
+            boxes=augmented_boxes,
+            applied=color_applied or flip_applied,
             metadata=metadata,
         )
 
@@ -237,7 +295,7 @@ def _color_parameters_are_neutral(config: Any) -> bool:
 def _non_color_operation_enabled(config: AugmentationConfig) -> bool:
     return any(
         getattr(config, name).enabled
-        for name in ("horizontal_flip", "gaussian_blur", "gaussian_noise", "affine")
+        for name in ("gaussian_blur", "gaussian_noise", "affine")
     )
 
 

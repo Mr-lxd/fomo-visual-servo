@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -203,6 +204,7 @@ def _render_variant_panel(
     input_size: int,
     stride: int,
     title: str,
+    draw_center_line: bool = False,
 ) -> np.ndarray:
     """Render one RGB variant with its unchanged bbox and centroid heatmap."""
 
@@ -211,6 +213,9 @@ def _render_variant_panel(
         letterboxed, _transform_boxes(boxes, transform), class_names
     )
     panel = _draw_decoded_centroids(panel, sample, stride)
+    if draw_center_line:
+        center_x = input_size // 2
+        cv2.line(panel, (center_x, 0), (center_x, input_size - 1), (255, 255, 255), 1)
     return _panel_title(panel, title)
 
 
@@ -281,6 +286,200 @@ def _metadata_from_factors(factors: ColorJitterFactors) -> Any:
         saturation_factor=factors.saturation_factor,
         hue_shift=factors.hue_shift,
     )
+
+
+def _serialize_boxes(boxes: Sequence[AbsoluteBox]) -> list[dict[str, float | int]]:
+    """Serialize continuous xyxy boxes without absolute image paths."""
+
+    return [
+        {
+            "class_id": int(box.foreground_class_id),
+            "x_min": float(box.x_min),
+            "y_min": float(box.y_min),
+            "x_max": float(box.x_max),
+            "y_max": float(box.y_max),
+        }
+        for box in boxes
+    ]
+
+
+def _serialize_centroids(
+    boxes: Sequence[AbsoluteBox],
+) -> list[dict[str, float | int]]:
+    """Serialize bbox centers in original-image continuous pixel coordinates."""
+
+    return [
+        {
+            "class_id": int(box.foreground_class_id),
+            "x": float(box.center[0]),
+            "y": float(box.center[1]),
+        }
+        for box in boxes
+    ]
+
+
+def _horizontal_flip_record(
+    dataset: YOLOv5FOMODataset,
+    index: int,
+    seed: int,
+    case: str,
+    sample: FOMOSample,
+) -> dict[str, Any]:
+    """Build the aug02 JSON record with original and transformed geometry."""
+
+    metadata = sample.augmentation_metadata
+    return {
+        "relative_image_path": dataset.image_paths[index]
+        .relative_to(dataset.root)
+        .as_posix(),
+        "seed": int(seed),
+        "case": case,
+        "horizontal_flip_applied": bool(metadata.horizontal_flip_applied),
+        "original_boxes": _serialize_boxes(sample.original_boxes),
+        "flipped_boxes": _serialize_boxes(sample.augmented_boxes),
+        "original_centroids": _serialize_centroids(sample.original_boxes),
+        "flipped_centroids": _serialize_centroids(sample.augmented_boxes),
+        "color_jitter_factors": {
+            "brightness_factor": float(metadata.brightness_factor),
+            "contrast_factor": float(metadata.contrast_factor),
+            "saturation_factor": float(metadata.saturation_factor),
+            "hue_shift": float(metadata.hue_shift),
+        },
+    }
+
+
+def _dataset_with_augmentation(
+    dataset: YOLOv5FOMODataset, augmentation: AugmentationConfig
+) -> YOLOv5FOMODataset:
+    """Clone dataset geometry settings with one visualization-only augmentation config."""
+
+    return YOLOv5FOMODataset(
+        dataset.root,
+        split=dataset.split,
+        input_size=dataset.input_size,
+        stride=dataset.stride,
+        class_mode=dataset.class_mode,
+        merged_class_name=dataset.class_names[0],
+        collision_policy=dataset.collision_policy,
+        augmentation=augmentation,
+        train_split=dataset.train_split,
+        augmentation_seed=dataset.augmentation_seed,
+    )
+
+
+def render_horizontal_flip_contact_sheet(
+    dataset: YOLOv5FOMODataset,
+    config: ProjectConfig,
+    output_dir: Path,
+    *,
+    num_images: int,
+    seed: int,
+) -> tuple[Path, Path]:
+    """Render aug02 geometry panels with neutral forced-flip controls."""
+
+    if num_images <= 0:
+        raise ValueError("num_images must be positive")
+    if len(dataset) < num_images:
+        raise ValueError(
+            "requested {} images but split contains only {}".format(
+                num_images, len(dataset)
+            )
+        )
+
+    neutral_color = replace(
+        config.augmentation.color_jitter,
+        enabled=False,
+        probability=0.0,
+        brightness=0.0,
+        contrast=0.0,
+        saturation=0.0,
+        hue=0.0,
+    )
+    forced_flip_config = replace(
+        config.augmentation,
+        color_jitter=neutral_color,
+        horizontal_flip=replace(
+            config.augmentation.horizontal_flip,
+            enabled=True,
+            probability=1.0,
+        ),
+    )
+    raw_dataset = _dataset_with_augmentation(
+        dataset, AugmentationConfig.disabled()
+    )
+    forced_dataset = _dataset_with_augmentation(dataset, forced_flip_config)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    records = []
+    for index in range(num_images):
+        image_seed = seed + index * 10
+        raw = raw_dataset.get_sample(index, np.random.default_rng(image_seed))
+        forced = forced_dataset.get_sample(index, np.random.default_rng(image_seed))
+        variants = [
+            dataset.get_sample(index, np.random.default_rng(image_seed + variant))
+            for variant in range(4)
+        ]
+        panels = [
+            _render_variant_panel(
+                raw.original_image,
+                raw.original_boxes,
+                raw,
+                dataset.class_names,
+                dataset.input_size,
+                dataset.stride,
+                "original",
+                draw_center_line=True,
+            ),
+            _render_variant_panel(
+                forced.augmented_image,
+                forced.augmented_boxes,
+                forced,
+                dataset.class_names,
+                dataset.input_size,
+                dataset.stride,
+                "forced flip neutral",
+                draw_center_line=True,
+            ),
+        ]
+        records.append(_horizontal_flip_record(dataset, index, image_seed, "original", raw))
+        records.append(
+            _horizontal_flip_record(dataset, index, image_seed, "forced_flip", forced)
+        )
+        for variant, sample in enumerate(variants):
+            metadata = sample.augmentation_metadata
+            factors = ColorJitterFactors(
+                metadata.brightness_factor,
+                metadata.contrast_factor,
+                metadata.saturation_factor,
+                metadata.hue_shift,
+            )
+            case = "typical" if variant == 0 else "random{}".format(variant)
+            panels.append(
+                _render_variant_panel(
+                    sample.augmented_image,
+                    sample.augmented_boxes,
+                    sample,
+                    dataset.class_names,
+                    dataset.input_size,
+                    dataset.stride,
+                    "{} {}".format(case, _factor_text(factors)),
+                    draw_center_line=True,
+                )
+            )
+            records.append(
+                _horizontal_flip_record(dataset, index, image_seed + variant, case, sample)
+            )
+        rows.append(np.hstack(panels))
+
+    contact_sheet = np.vstack(rows)
+    contact_path = output_dir / "horizontal_flip_contact_sheet.jpg"
+    json_path = output_dir / "horizontal_flip_samples.json"
+    if not cv2.imwrite(str(contact_path), contact_sheet):
+        raise RuntimeError("unable to write contact sheet: {}".format(contact_path))
+    json_path.write_text(
+        json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return contact_path, json_path
 
 
 def render_contact_sheet(
@@ -483,13 +682,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if config is None:
         raise ValueError("--config is required for contact-sheet mode")
     output_dir = args.output_dir or (config.training.output_dir / "visualization")
-    contact_path, json_path = render_contact_sheet(
-        dataset,
-        config,
-        output_dir,
-        num_images=args.num_images,
-        seed=seed,
-    )
+    if config.augmentation.horizontal_flip.enabled:
+        contact_path, json_path = render_horizontal_flip_contact_sheet(
+            dataset,
+            config,
+            output_dir,
+            num_images=args.num_images,
+            seed=seed,
+        )
+    else:
+        contact_path, json_path = render_contact_sheet(
+            dataset,
+            config,
+            output_dir,
+            num_images=args.num_images,
+            seed=seed,
+        )
     print("Wrote {}".format(contact_path))
     print("Wrote {}".format(json_path))
     if args.show:

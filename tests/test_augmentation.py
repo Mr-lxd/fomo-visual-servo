@@ -249,8 +249,8 @@ def test_enabled_future_augmentation_fails_explicitly(tmp_path: Path) -> None:
 
     enabled = _disabled_yaml().replace("enabled: false", "enabled: true", 1)
     enabled = enabled.replace(
-        "  horizontal_flip:\n    enabled: false",
-        "  horizontal_flip:\n    enabled: true",
+        "  gaussian_blur:\n    enabled: false",
+        "  gaussian_blur:\n    enabled: true",
     )
     config = load_config(_write_config(tmp_path / "enabled.yaml", enabled))
     pipeline_type, error_type, _ = _augmentation_api()
