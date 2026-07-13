@@ -30,3 +30,24 @@ evaluation:
 5. `best_val_f1.pt` 保留为兼容别名，metadata 中的 `best_val_f1_alias_target` 表明其实际对应的 criterion 文件。
 
 旧 YAML 的 `postprocess.confidence_threshold` 仍可读取，但会发出 `DeprecationWarning`，且只作为 inference threshold 的兼容输入；它不会隐式改变 checkpoint threshold。
+# Checkpoint selection protocol v2
+
+`last.pt`, `best_val_f1.pt`, `best_grid_f1.pt`, and `best_centroid_f1.pt` remain
+the legacy full training checkpoints.  In particular, `best_centroid_f1.pt`
+continues to mean fixed-threshold (`0.5`) centroid F1; its explicit metadata
+name is `fixed_centroid_f1`.
+
+When enabled, epoch snapshots are portable CPU weights-only files.  Offline
+selection writes `best_centroid_pr_auc_macro.pt` and
+`best_sweep_centroid_f1.pt` as non-resumable inference/evaluation candidates.
+They have `resumable: false`; attempting to resume from them is an error.  Use
+`last.pt` for resuming.
+
+`centroid_pr_auc_macro` evaluates postprocessed centroids at the configured
+threshold grid.  For each foreground class with ground truth, the raw points
+are sorted by recall, duplicate recall values retain maximum precision, and
+the observed coordinates are integrated with trapezoids.  No AP envelope or
+artificial endpoints are added, so this is neither COCO mAP nor interpolated
+average precision.  Classes with no ground truth are excluded and the effective
+class count is recorded.  Epoch ties choose the earlier epoch, then source
+filename; threshold ties choose the lower threshold.

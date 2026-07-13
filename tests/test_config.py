@@ -132,6 +132,73 @@ training:
     assert config.loss.class_weights == (1.0, 1.0)
 
 
+def test_load_config_reads_inert_checkpoint_selection_v2_defaults(tmp_path: Path) -> None:
+    """Existing YAML must receive disabled snapshots and deterministic v2 defaults."""
+
+    _, load_config = _config_api()
+    assert callable(load_config)
+    config_path = tmp_path / "v2_defaults.yaml"
+    config_path.write_text(
+        """
+dataset:
+  root: data/aquarium_creature
+  classes: [creature]
+model:
+  input_size: 96
+  output_stride: 8
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.training.epoch_snapshots.enabled is False
+    assert config.training.epoch_snapshots.format == "weights_only"
+    assert config.training.epoch_snapshots.interval == 1
+    assert config.training.epoch_snapshots.keep_last is None
+    assert config.evaluation.checkpoint_selection.metric == "centroid_pr_auc_macro"
+    assert config.evaluation.checkpoint_selection.split == config.dataset.validation_split
+    assert config.evaluation.checkpoint_selection.threshold_grid == config.evaluation.threshold_sweep
+    assert config.evaluation.threshold_calibration.enabled is False
+    assert config.evaluation.threshold_calibration.fallback_threshold == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    ("yaml_fragment", "message"),
+    [
+        ("format: full", "training.epoch_snapshots.format"),
+        ("interval: 0", "training.epoch_snapshots.interval"),
+        ("keep_last: 0", "training.epoch_snapshots.keep_last"),
+    ],
+)
+def test_load_config_rejects_invalid_epoch_snapshot_settings(
+    tmp_path: Path, yaml_fragment: str, message: str
+) -> None:
+    """Weights-only snapshots have a deliberately small, strict schema."""
+
+    configuration_error, load_config = _config_api()
+    assert callable(load_config)
+    config_path = tmp_path / "invalid_snapshots.yaml"
+    config_path.write_text(
+        """
+dataset:
+  root: data/aquarium_creature
+  classes: [creature]
+model:
+  input_size: 96
+  output_stride: 8
+training:
+  epoch_snapshots:
+    enabled: true
+    {yaml_fragment}
+""".format(yaml_fragment=yaml_fragment).lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(configuration_error, match=message):
+        load_config(config_path)
+
+
 def test_load_config_accepts_uppercase_train_alias(tmp_path: Path) -> None:
     configuration_error, load_config = _config_api()
     assert callable(load_config), "fomo_servo.config.load_config must be available"

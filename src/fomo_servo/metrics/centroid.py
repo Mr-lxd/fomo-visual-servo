@@ -328,6 +328,9 @@ def _metrics_dict(true_positive: int, false_positive: int, false_negative: int) 
         "precision": precision,
         "recall": recall,
         "f1": _f1(precision, recall),
+        "true_positives": float(true_positive),
+        "false_positives": float(false_positive),
+        "false_negatives": float(false_negative),
     }
 
 

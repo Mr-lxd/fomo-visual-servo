@@ -43,6 +43,7 @@ def _write_training_config(
     *,
     epochs: int,
     resume: Path | None = None,
+    epoch_snapshots_yaml: str = "",
 ) -> Path:
     """Write a complete YAML run config for the synthetic two-class YOLO fixture."""
 
@@ -78,6 +79,7 @@ training:
   resume: {resume}
   early_stopping_patience: 0
   early_stopping_min_delta: 0.0
+{epoch_snapshots_yaml}
   optimizer:
     name: adamw
     learning_rate: 0.001
@@ -91,10 +93,46 @@ training:
             epochs=epochs,
             output_dir=output_dir.as_posix(),
             resume=resume_text,
+            epoch_snapshots_yaml=epoch_snapshots_yaml,
         ).lstrip(),
         encoding="utf-8",
     )
     return path
+
+
+def test_epoch_snapshot_interval_writes_weights_only_without_changing_legacy_checkpoints(
+    tmp_path: Path,
+) -> None:
+    """v2 snapshots are opt-in and leave full checkpoint protocol intact."""
+
+    _, run_training, _ = _engine_api()
+    assert callable(run_training)
+    output_dir = tmp_path / "snapshot-run"
+    config = load_config(
+        _write_training_config(
+            tmp_path / "snapshot.yaml",
+            output_dir,
+            epochs=2,
+            epoch_snapshots_yaml=(
+                "  epoch_snapshots:\n"
+                "    enabled: true\n"
+                "    format: weights_only\n"
+                "    interval: 2\n"
+                "    keep_last: null"
+            ),
+        )
+    )
+
+    run_training(config, device_override="cpu")
+
+    snapshots = sorted((output_dir / "epoch_snapshots").glob("*.pt"))
+    assert [path.name for path in snapshots] == ["epoch_002_weights.pt"]
+    payload = torch.load(snapshots[0], map_location="cpu", weights_only=False)
+    assert payload["checkpoint_kind"] == "epoch_snapshot"
+    assert "optimizer_state" not in payload
+    assert (output_dir / "last.pt").is_file()
+    legacy_payload = torch.load(output_dir / "last.pt", map_location="cpu", weights_only=False)
+    assert "optimizer_state" in legacy_payload
 
 
 def test_collate_fomo_samples_returns_training_tensor_contract() -> None:
@@ -156,6 +194,7 @@ def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path)
     assert best_checkpoint.is_file()
     assert best_grid_checkpoint.is_file()
     assert best_centroid_checkpoint.is_file()
+    assert not (output_dir / "epoch_snapshots").exists()
     assert summary_path.is_file()
     checkpoint_payload = torch.load(last_checkpoint, map_location="cpu", weights_only=False)
     assert checkpoint_payload["checkpoint_type"] == "last"

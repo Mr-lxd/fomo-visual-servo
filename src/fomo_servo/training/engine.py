@@ -64,6 +64,7 @@ from fomo_servo.training.runtime import (
     move_training_batch,
     prepare_model,
 )
+from fomo_servo.training.snapshots import config_fingerprint, write_epoch_snapshot
 
 
 class TrainingError(RuntimeError):
@@ -135,6 +136,15 @@ class TrainingSummary:
     resolved_augmentation: dict[str, Any] = field(default_factory=dict)
     augmentation_epoch_stats: tuple[dict[str, Any], ...] = ()
     model_metadata: dict[str, Any] = field(default_factory=dict)
+    checkpoint_selection_protocol: str = "v2"
+    legacy_best_fixed_centroid_epoch: int = 0
+    best_pr_auc_macro_epoch: Optional[int] = None
+    best_sweep_f1_epoch: Optional[int] = None
+    checkpoint_selection_metric: str = "centroid_pr_auc_macro"
+    selection_split: str = "validation"
+    calibration_split: Optional[str] = None
+    calibrated_threshold: Optional[float] = None
+    calibration_is_optimistic: bool = False
 
 
 @dataclass
@@ -345,6 +355,23 @@ def run_training(
 
     output_dir = config.training.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_metadata: dict[str, str] | None = None
+    if config.training.epoch_snapshots.enabled:
+        try:
+            content_manifest = dataset_content_manifest(
+                config.dataset.root,
+                config.dataset.train_split,
+                config.dataset.validation_split,
+            )
+            snapshot_metadata = {
+                "config_fingerprint": config_fingerprint(config),
+                "dataset_content_hash": str(content_manifest["dataset_content_hash"]),
+                "git_commit_sha": git_commit_sha(Path(__file__).resolve()),
+            }
+        except (ExperimentMetadataError, ValueError, TypeError) as error:
+            raise TrainingError(
+                "unable to collect epoch snapshot provenance: {}".format(error)
+            ) from error
     history_path = output_dir / "history.csv"
     resume_path = resume_override if resume_override is not None else config.training.resume
     augmentation_epoch_stats: list[dict[str, Any]] = []
@@ -502,7 +529,7 @@ def run_training(
                 _checkpoint_payload(
                     **checkpoint_arguments,
                     checkpoint_type="best_centroid_f1",
-                    selection_metric="centroid_f1",
+                    selection_metric="fixed_centroid_f1",
                 ),
                 output_dir / "best_centroid_f1.pt",
             )
@@ -515,6 +542,26 @@ def run_training(
                 ),
                 output_dir / "best_val_f1.pt",
             )
+        if (
+            snapshot_metadata is not None
+            and epoch % config.training.epoch_snapshots.interval == 0
+        ):
+            try:
+                write_epoch_snapshot(
+                    model=model,
+                    epoch=epoch,
+                    output_dir=output_dir,
+                    model_metadata=model_metadata,
+                    config_fingerprint=snapshot_metadata["config_fingerprint"],
+                    dataset_content_hash=snapshot_metadata["dataset_content_hash"],
+                    git_commit_sha=snapshot_metadata["git_commit_sha"],
+                    seed=config.training.seed,
+                    augmentation_preset=config.augmentation.preset,
+                    checkpoint_threshold=config.evaluation.checkpoint_threshold,
+                    keep_last=config.training.epoch_snapshots.keep_last,
+                )
+            except RuntimeError as error:
+                raise TrainingError("unable to write epoch snapshot: {}".format(error)) from error
         _append_history(
             history_path,
             epoch=epoch,
@@ -559,6 +606,20 @@ def run_training(
         resolved_augmentation=resolved_augmentation_dict(config.augmentation),
         augmentation_epoch_stats=tuple(augmentation_epoch_stats),
         model_metadata=model_metadata,
+        legacy_best_fixed_centroid_epoch=best_centroid_epoch,
+        checkpoint_selection_metric=config.evaluation.checkpoint_selection.metric,
+        selection_split=config.evaluation.checkpoint_selection.split,
+        calibration_split=(
+            config.evaluation.threshold_calibration.split
+            if config.evaluation.threshold_calibration.enabled
+            else None
+        ),
+        calibration_is_optimistic=(
+            config.evaluation.threshold_calibration.enabled
+            and config.evaluation.threshold_calibration.split
+            == config.evaluation.checkpoint_selection.split
+            and config.evaluation.threshold_calibration.allow_selection_split
+        ),
     )
     if config.experiment.name is not None:
         final_sweep_best_threshold = _record_experiment(
@@ -981,6 +1042,15 @@ def _write_training_summary(summary_path: Path, summary: TrainingSummary) -> Non
         "resolved_augmentation": summary.resolved_augmentation,
         "augmentation_epoch_stats": list(summary.augmentation_epoch_stats),
         "model_metadata": summary.model_metadata,
+        "checkpoint_selection_protocol": summary.checkpoint_selection_protocol,
+        "legacy_best_fixed_centroid_epoch": summary.legacy_best_fixed_centroid_epoch,
+        "best_pr_auc_macro_epoch": summary.best_pr_auc_macro_epoch,
+        "best_sweep_f1_epoch": summary.best_sweep_f1_epoch,
+        "checkpoint_selection_metric": summary.checkpoint_selection_metric,
+        "selection_split": summary.selection_split,
+        "calibration_split": summary.calibration_split,
+        "calibrated_threshold": summary.calibrated_threshold,
+        "calibration_is_optimistic": summary.calibration_is_optimistic,
     }
     try:
         summary_path.write_text(
@@ -1170,6 +1240,15 @@ def _restore_checkpoint(
         ) from error
     if not isinstance(checkpoint, dict):
         raise TrainingError("resume checkpoint must contain a mapping")
+    if (
+        checkpoint.get("checkpoint_kind") == "inference_candidate"
+        or checkpoint.get("resumable") is False
+    ):
+        raise TrainingError(
+            "resume checkpoint is an inference/evaluation candidate or weights-only "
+            "snapshot and cannot resume training: it has no optimizer, scheduler, "
+            "scaler, or complete training state; resume from last.pt instead"
+        )
     required_keys = {
         "model_state",
         "optimizer_state",

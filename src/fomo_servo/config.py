@@ -50,6 +50,16 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class EpochSnapshotConfig:
+    """Weights-only epoch snapshot schedule; disabled by default for compatibility."""
+
+    enabled: bool = False
+    format: str = "weights_only"
+    interval: int = 1
+    keep_last: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     """YAML-controlled runtime fields for future training and evaluation entry points."""
 
@@ -66,6 +76,7 @@ class TrainingConfig:
     early_stopping_patience: int = 0
     early_stopping_min_delta: float = 0.0
     checkpoint_criterion: str = "grid_f1"
+    epoch_snapshots: EpochSnapshotConfig = field(default_factory=EpochSnapshotConfig)
     optimizer: "OptimizerConfig" = field(
         default_factory=lambda: OptimizerConfig(
             name="adamw", learning_rate=0.001, weight_decay=0.0
@@ -222,6 +233,28 @@ class PostprocessConfig:
 
 
 @dataclass(frozen=True)
+class CheckpointSelectionConfig:
+    """Offline candidate selection settings; they do not change training selection."""
+
+    metric: str = "centroid_pr_auc_macro"
+    split: str = "validation"
+    threshold_grid: Tuple[float, ...] = tuple(
+        round(0.05 + index * 0.05, 10) for index in range(19)
+    )
+
+
+@dataclass(frozen=True)
+class ThresholdCalibrationConfig:
+    """Optional offline threshold calibration with explicit split-reuse opt-in."""
+
+    enabled: bool = False
+    split: str = "calibration"
+    objective: str = "centroid_f1"
+    fallback_threshold: float = 0.5
+    allow_selection_split: bool = False
+
+
+@dataclass(frozen=True)
 class EvaluationConfig:
     """YAML-controlled centroid matching and validation threshold sweep settings."""
 
@@ -234,6 +267,12 @@ class EvaluationConfig:
     threshold_sweep_step: float = 0.05
     threshold_sweep: Tuple[float, ...] = tuple(
         round(0.05 + index * 0.05, 10) for index in range(19)
+    )
+    checkpoint_selection: CheckpointSelectionConfig = field(
+        default_factory=CheckpointSelectionConfig
+    )
+    threshold_calibration: ThresholdCalibrationConfig = field(
+        default_factory=ThresholdCalibrationConfig
     )
 
 
@@ -537,6 +576,91 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             if len(threshold_sweep) > 1
             else 0.05
         )
+    selection_mapping = _optional_mapping(evaluation_mapping, "checkpoint_selection")
+    selection_metric = _optional_text(
+        selection_mapping,
+        "metric",
+        "centroid_pr_auc_macro",
+        "evaluation.checkpoint_selection",
+    )
+    if selection_metric not in {
+        "centroid_pr_auc_macro",
+        "max_centroid_f1_over_thresholds",
+    }:
+        raise ConfigurationError(
+            "evaluation.checkpoint_selection.metric must be "
+            "'centroid_pr_auc_macro' or 'max_centroid_f1_over_thresholds'"
+        )
+    selection_split = _optional_text(
+        selection_mapping,
+        "split",
+        validation_split,
+        "evaluation.checkpoint_selection",
+    )
+    selection_grid_mapping = selection_mapping.get("threshold_grid")
+    if selection_grid_mapping is None:
+        selection_threshold_grid = threshold_sweep
+    elif not isinstance(selection_grid_mapping, Mapping):
+        raise ConfigurationError("evaluation.checkpoint_selection.threshold_grid must be a mapping")
+    else:
+        selection_minimum = _optional_probability(
+            selection_grid_mapping,
+            "minimum",
+            threshold_sweep_minimum,
+            "evaluation.checkpoint_selection.threshold_grid",
+        )
+        selection_maximum = _optional_probability(
+            selection_grid_mapping,
+            "maximum",
+            threshold_sweep_maximum,
+            "evaluation.checkpoint_selection.threshold_grid",
+        )
+        selection_step = _optional_positive_float(
+            selection_grid_mapping,
+            "step",
+            threshold_sweep_step,
+            "evaluation.checkpoint_selection.threshold_grid",
+        )
+        if selection_minimum > selection_maximum:
+            raise ConfigurationError(
+                "evaluation.checkpoint_selection.threshold_grid.minimum must not exceed maximum"
+            )
+        selection_threshold_grid = _build_threshold_sweep(
+            selection_minimum,
+            selection_maximum,
+            selection_step,
+            checkpoint_threshold,
+            enabled=True,
+        )
+    calibration_mapping = _optional_mapping(evaluation_mapping, "threshold_calibration")
+    calibration_enabled = _optional_boolean(
+        calibration_mapping, "enabled", False, "evaluation.threshold_calibration"
+    )
+    calibration_split = _optional_text(
+        calibration_mapping, "split", "calibration", "evaluation.threshold_calibration"
+    )
+    calibration_objective = _optional_text(
+        calibration_mapping,
+        "objective",
+        "centroid_f1",
+        "evaluation.threshold_calibration",
+    )
+    if calibration_objective != "centroid_f1":
+        raise ConfigurationError(
+            "evaluation.threshold_calibration.objective must be 'centroid_f1'"
+        )
+    calibration_fallback_threshold = _optional_probability(
+        calibration_mapping,
+        "fallback_threshold",
+        checkpoint_threshold,
+        "evaluation.threshold_calibration",
+    )
+    calibration_allow_selection_split = _optional_boolean(
+        calibration_mapping,
+        "allow_selection_split",
+        False,
+        "evaluation.threshold_calibration",
+    )
 
     experiment_mapping = _optional_mapping(payload, "experiment")
     experiment_name = _optional_nullable_text(
@@ -583,6 +707,23 @@ def load_config(path: ConfigPath) -> ProjectConfig:
         raise ConfigurationError(
             "training.checkpoint_criterion must be 'grid_f1' or 'centroid_f1'"
         )
+    snapshot_mapping = _optional_mapping(training_mapping, "epoch_snapshots")
+    snapshot_enabled = _optional_boolean(
+        snapshot_mapping, "enabled", False, "training.epoch_snapshots"
+    )
+    snapshot_format = _optional_text(
+        snapshot_mapping, "format", "weights_only", "training.epoch_snapshots"
+    )
+    if snapshot_format != "weights_only":
+        raise ConfigurationError(
+            "training.epoch_snapshots.format must be 'weights_only'"
+        )
+    snapshot_interval = _optional_positive_integer(
+        snapshot_mapping, "interval", 1, "training.epoch_snapshots"
+    )
+    snapshot_keep_last = _optional_nullable_positive_integer(
+        snapshot_mapping, "keep_last", "training.epoch_snapshots"
+    )
     optimizer_mapping = _optional_mapping(training_mapping, "optimizer")
     optimizer_name = _optional_text(
         optimizer_mapping, "name", "adamw", "training.optimizer"
@@ -654,6 +795,12 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             early_stopping_patience=early_stopping_patience,
             early_stopping_min_delta=early_stopping_min_delta,
             checkpoint_criterion=checkpoint_criterion,
+            epoch_snapshots=EpochSnapshotConfig(
+                enabled=snapshot_enabled,
+                format=snapshot_format,
+                interval=snapshot_interval,
+                keep_last=snapshot_keep_last,
+            ),
             optimizer=OptimizerConfig(
                 name=optimizer_name,
                 learning_rate=learning_rate,
@@ -686,6 +833,18 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             threshold_sweep_maximum=threshold_sweep_maximum,
             threshold_sweep_step=threshold_sweep_step,
             threshold_sweep=threshold_sweep,
+            checkpoint_selection=CheckpointSelectionConfig(
+                metric=selection_metric,
+                split=selection_split,
+                threshold_grid=selection_threshold_grid,
+            ),
+            threshold_calibration=ThresholdCalibrationConfig(
+                enabled=calibration_enabled,
+                split=calibration_split,
+                objective=calibration_objective,
+                fallback_threshold=calibration_fallback_threshold,
+                allow_selection_split=calibration_allow_selection_split,
+            ),
         ),
         source_path=source_path,
         experiment=ExperimentConfig(
@@ -1125,6 +1284,21 @@ def _optional_positive_integer(
     value = payload.get(name, default)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ConfigurationError("{}.{} must be a positive integer".format(section, name))
+    return value
+
+
+def _optional_nullable_positive_integer(
+    payload: Mapping[str, Any], name: str, section: str
+) -> Optional[int]:
+    """Return null or a strictly positive integer from a YAML mapping."""
+
+    value = payload.get(name)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ConfigurationError(
+            "{}.{} must be null or a positive integer".format(section, name)
+        )
     return value
 
 
