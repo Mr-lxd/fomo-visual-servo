@@ -196,7 +196,9 @@ training:
 
 每个 epoch 会记录 `train_loss`、`val_loss`、网格级指标和固定阈值下的 centroid 指标到 `<output_dir>/history.csv`。始终保存 `<output_dir>/last.pt`，并分别按固定 `evaluation.checkpoint_threshold` 保存 `best_grid_f1.pt` 与 `best_centroid_f1.pt`；`best_val_f1.pt` 是当前 `training.checkpoint_criterion` 对应文件的兼容别名。checkpoint 含模型、优化器、scheduler、AMP scaler、随机状态、选择指标和选择阈值，因此可从 `last.pt` 继续训练。
 
-推理阈值与 checkpoint 选择阈值严格分离：`postprocess.inference_threshold` 供图片/视频推理默认使用，`evaluation.checkpoint_threshold` 只用于每个 epoch 的 checkpoint 选择。`evaluation.threshold_sweep` 只在训练结束后评价最终选中的 checkpoint，不参与 epoch 级选择。旧配置中的 `postprocess.confidence_threshold` 仍可加载，但会发出弃用警告，并且只映射为推理阈值。
+推理阈值与 checkpoint 选择阈值严格分离：`postprocess.inference_threshold` 供图片/视频推理默认使用，`evaluation.checkpoint_threshold` 只用于每个 epoch 的 legacy 固定阈值指标。当前默认的 checkpoint selection v2 采用 Train/Validation/Test 三划分协议：Validation 先按 `centroid_pr_auc_macro` 选择主 candidate，再在同一 Validation split 上按 `centroid_f1` 调整 threshold；Test 只读取锁定的 epoch 58 candidate 和 validation threshold，禁止 sweep、自动搜索或比较多个 checkpoint。详细协议见 [docs/threshold_protocol.md](docs/threshold_protocol.md)。旧配置中的 `postprocess.confidence_threshold` 仍可加载，但会发出弃用警告，并且只映射为推理阈值。
+
+正式 Stage B 流程使用 `scripts/tune_validation_threshold.py` 生成 `threshold_tuning.json` 和 `locked_test_protocol.json`，再使用 `scripts/evaluate_locked_test.py` 输出一次 `final_test_metrics.json` 与 `final_test_metrics.csv`。独立 calibration split 仍可作为高级可选模式，但不是默认要求。
 
 ## Roboflow YOLO 数据集
 

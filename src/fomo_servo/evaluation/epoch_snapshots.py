@@ -217,6 +217,9 @@ def evaluate_collected_logits(
         thresholds=config.evaluation.checkpoint_selection.threshold_grid,
         matching_mode=config.evaluation.matching_mode,
         max_distance_pixels=config.evaluation.max_distance_pixels,
+        class_thresholds=config.postprocess.class_thresholds,
+        component_mode=config.postprocess.component_mode,
+        confidence_mode=config.postprocess.confidence_mode,
     )
     pr_auc = centroid_pr_auc(sweep.results, config.dataset.class_names)
     fixed_detection_count = sum(

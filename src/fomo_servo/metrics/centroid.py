@@ -264,6 +264,9 @@ def sweep_confidence_thresholds(
     thresholds: Sequence[float],
     matching_mode: str = "centroid_in_bbox",
     max_distance_pixels: float = 32.0,
+    class_thresholds: Optional[Sequence[float]] = None,
+    component_mode: str = "connected_components",
+    confidence_mode: str = "max",
 ) -> ThresholdSweepResult:
     """Run the same postprocessor at each validation threshold and select max F1."""
 
@@ -291,6 +294,9 @@ def sweep_confidence_thresholds(
                     stride=stride,
                     transforms=(transform,),
                     confidence_threshold=float(threshold),
+                    class_thresholds=class_thresholds,
+                    component_mode=component_mode,
+                    confidence_mode=confidence_mode,
                 )[0]
             )
         results[float(threshold)] = evaluator.evaluate_dataset(detections, ground_truths)

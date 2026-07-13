@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
@@ -91,8 +92,62 @@ def evaluate_logit_collection(
     The transform and ground-truth sequences retain one item per image.
     """
 
+    fixed = evaluate_logit_collection_at_threshold(
+        logits=logits,
+        targets=targets,
+        transforms=transforms,
+        ground_truths=ground_truths,
+        class_names=class_names,
+        stride=stride,
+        postprocess_config=postprocess_config,
+        evaluation_config=evaluation_config,
+    )
+    sweep = sweep_confidence_thresholds(
+        logits=logits,
+        transforms=transforms,
+        ground_truths=ground_truths,
+        class_names=class_names,
+        stride=stride,
+        thresholds=evaluation_config.threshold_sweep,
+        matching_mode=evaluation_config.matching_mode,
+        max_distance_pixels=evaluation_config.max_distance_pixels,
+        class_thresholds=postprocess_config.class_thresholds,
+        component_mode=postprocess_config.component_mode,
+        confidence_mode=postprocess_config.confidence_mode,
+    )
+    return ValidationReport(
+        grid_metrics=fixed.grid_metrics,
+        centroid_metrics=fixed.centroid_metrics,
+        best_threshold=sweep.best_threshold,
+        best_centroid_metrics=sweep.best_result,
+    )
+
+
+def evaluate_logit_collection_at_threshold(
+    *,
+    logits: Sequence[Tensor],
+    targets: Sequence[Tensor],
+    transforms: Sequence[object],
+    ground_truths: Sequence[Sequence[object]],
+    class_names: Sequence[str],
+    stride: int,
+    postprocess_config: PostprocessConfig,
+    evaluation_config: EvaluationConfig,
+) -> ValidationReport:
+    """Evaluate one explicit threshold without running a threshold sweep.
+
+    ``logits`` items have shape ``[C,G,G]`` or ``[1,C,G,G]`` and ``targets``
+    items have shape ``[G,G]``.  The returned report contains grid metrics and
+    centroid metrics at ``postprocess_config.inference_threshold``; its
+    ``best_threshold`` is that same fixed threshold.  This function is used by
+    locked test evaluation so test data cannot influence threshold selection.
+    """
+
     if not (len(logits) == len(targets) == len(transforms) == len(ground_truths)):
         raise ValueError("validation collections must have equal lengths")
+    threshold = postprocess_config.inference_threshold
+    if not isinstance(threshold, (int, float)) or not isfinite(float(threshold)):
+        raise ValueError("postprocess threshold must be a finite number")
     normalized_logits = []
     for item in logits:
         if item.ndim == 4 and item.shape[0] == 1:
@@ -100,7 +155,9 @@ def evaluate_logit_collection(
         if item.ndim != 3:
             raise ValueError("each logits item must have shape [C,G,G] or [1,C,G,G]")
         normalized_logits.append(item)
-    prediction_tensors = torch.stack([target.to(dtype=torch.int64) for target in targets], dim=0)
+    prediction_tensors = torch.stack(
+        [target.to(dtype=torch.int64) for target in targets], dim=0
+    )
     predicted_tensors = torch.stack(
         [item.argmax(dim=0).to(dtype=torch.int64) for item in normalized_logits], dim=0
     )
@@ -110,36 +167,26 @@ def evaluate_logit_collection(
         matching_mode=evaluation_config.matching_mode,
         max_distance_pixels=evaluation_config.max_distance_pixels,
     )
-    configured_predictions = []
+    predictions = []
     for image_logits, transform in zip(normalized_logits, transforms):
-        configured_predictions.append(
+        predictions.append(
             postprocess_logits(
                 image_logits.unsqueeze(0),
                 class_names=class_names,
                 stride=stride,
                 transforms=(transform,),
-                confidence_threshold=postprocess_config.inference_threshold,
+                confidence_threshold=float(threshold),
                 class_thresholds=postprocess_config.class_thresholds,
                 component_mode=postprocess_config.component_mode,
                 confidence_mode=postprocess_config.confidence_mode,
             )[0]
         )
-    centroid_metrics = evaluator.evaluate_dataset(configured_predictions, ground_truths)
-    sweep = sweep_confidence_thresholds(
-        logits=tuple(normalized_logits),
-        transforms=transforms,
-        ground_truths=ground_truths,
-        class_names=class_names,
-        stride=stride,
-        thresholds=evaluation_config.threshold_sweep,
-        matching_mode=evaluation_config.matching_mode,
-        max_distance_pixels=evaluation_config.max_distance_pixels,
-    )
+    centroid_metrics = evaluator.evaluate_dataset(predictions, ground_truths)
     return ValidationReport(
         grid_metrics=grid_metrics,
         centroid_metrics=centroid_metrics,
-        best_threshold=sweep.best_threshold,
-        best_centroid_metrics=sweep.best_result,
+        best_threshold=float(threshold),
+        best_centroid_metrics=centroid_metrics,
     )
 
 
