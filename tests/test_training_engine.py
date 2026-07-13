@@ -168,6 +168,8 @@ def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path)
     assert checkpoint_payload["augmentation_preset"] is None
     assert "color_jitter" in checkpoint_payload["resolved_augmentation"]
     assert checkpoint_payload["augmentation_stats"]["total_samples"] > 0
+    assert checkpoint_payload["model_metadata"]["backbone_name"] == "mobilenet_v2_lite"
+    assert checkpoint_payload["model_metadata"]["initialization"] == "pytorch_module_defaults"
     training_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert training_summary["class_weight_mode"] == "manual"
     assert training_summary["class_weights"] == [1.0, 3.0]
@@ -177,6 +179,7 @@ def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path)
     assert training_summary["checkpoint_threshold"] == pytest.approx(0.5)
     assert training_summary["best_val_f1_alias_target"] == "best_grid_f1.pt"
     assert len(training_summary["augmentation_epoch_stats"]) == 2
+    assert training_summary["model_metadata"] == checkpoint_payload["model_metadata"]
     assert [item["epoch"] for item in training_summary["augmentation_epoch_stats"]] == [1, 2]
     with history_path.open("r", newline="", encoding="utf-8") as history_file:
         first_rows = list(csv.DictReader(history_file))
@@ -213,6 +216,51 @@ def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path)
     assert len(resumed_rows) == 3
     resumed_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert resumed_summary["augmentation_epoch_stats"][-1]["epoch"] == 3
+
+
+def test_new_backbone_metadata_is_persisted_in_training_artifacts(
+    tmp_path: Path,
+) -> None:
+    """A real one-epoch CPU run must persist exact new-topology identity."""
+
+    _, run_training, _ = _engine_api()
+    assert callable(run_training)
+    output_dir = tmp_path / "new-backbone-run"
+    config_path = _write_training_config(
+        tmp_path / "new-backbone.yaml", output_dir, epochs=1
+    )
+    payload = config_path.read_text(encoding="utf-8").replace(
+        "  backbone: mobilenet_v2_lite\n",
+        "  backbone: mobilenet_v2_fomo\n"
+        "  cut_point: block_6_expand_relu\n"
+        "  pretrained: false\n",
+    )
+    config_path.write_text(payload, encoding="utf-8")
+
+    summary = run_training(load_config(config_path), device_override="cpu")
+    checkpoint = torch.load(
+        output_dir / "last.pt", map_location="cpu", weights_only=False
+    )
+    persisted_summary = json.loads(
+        (output_dir / "training_summary.json").read_text(encoding="utf-8")
+    )
+    expected = {
+        "backbone_name": "mobilenet_v2_fomo",
+        "width_multiplier": 0.35,
+        "cut_point": "block_6_expand_relu",
+        "cut_point_output_channels": 96,
+        "output_stride": 8,
+        "head_channels": 32,
+        "pretrained": False,
+        "initialization": "pytorch_module_defaults",
+        "backbone_parameter_count": 15_840,
+        "head_parameter_count": 3_170,
+        "parameter_count": 19_010,
+        "cut_point_input_channels": 16,
+    }
+    assert summary.model_metadata == expected
+    assert checkpoint["model_metadata"] == expected
+    assert persisted_summary["model_metadata"] == expected
 
 
 def test_training_propagates_epoch_to_train_dataset_and_resume(

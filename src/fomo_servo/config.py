@@ -45,6 +45,8 @@ class ModelConfig:
     backbone: str
     width_multiplier: float
     head_channels: int
+    cut_point: str = "lite_stride8_output"
+    pretrained: bool = False
 
 
 @dataclass(frozen=True)
@@ -366,6 +368,32 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     head_channels = _optional_positive_integer(
         model_mapping, "head_channels", 32, "model"
     )
+    default_cut_point = (
+        "block_6_expand_relu"
+        if backbone == "mobilenet_v2_fomo"
+        else "lite_stride8_output"
+    )
+    cut_point = _optional_text(
+        model_mapping, "cut_point", default_cut_point, "model"
+    )
+    pretrained = _optional_boolean(
+        model_mapping, "pretrained", False, "model"
+    )
+    expected_cut_points = {
+        "mobilenet_v2_lite": "lite_stride8_output",
+        "mobilenet_v2_fomo": "block_6_expand_relu",
+    }
+    expected_cut_point = expected_cut_points.get(backbone)
+    if expected_cut_point is not None and cut_point != expected_cut_point:
+        raise ConfigurationError(
+            f"model.cut_point must be '{expected_cut_point}' for "
+            f"model.backbone='{backbone}'"
+        )
+    if pretrained:
+        raise ConfigurationError(
+            "model.pretrained must be false because no pretrained source or "
+            "download path is configured"
+        )
 
     augmentation = _parse_augmentation_config(
         _optional_mapping(payload, "augmentation")
@@ -598,6 +626,8 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             backbone=backbone,
             width_multiplier=width_multiplier,
             head_channels=head_channels,
+            cut_point=cut_point,
+            pretrained=pretrained,
         ),
         loss=LossConfig(
             name=loss_name,

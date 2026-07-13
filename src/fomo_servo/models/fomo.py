@@ -236,22 +236,34 @@ class FOMONet(nn.Module):
             raise ValueError("images must have dtype torch.float32")
 
 
-def build_fomo_model(config: ProjectConfig) -> FOMONet:
+def build_fomo_model(config: ProjectConfig) -> nn.Module:
     """Build a YAML-configured FOMO model with logits [B,1+N,S/8,S/8]."""
 
-    if config.model.backbone != "mobilenet_v2_lite":
-        raise ModelConfigurationError(
-            "model.backbone must be 'mobilenet_v2_lite' for the first FOMO version"
-        )
     if config.model.output_stride != OUTPUT_STRIDE:
         raise ModelConfigurationError(
             f"model.output_stride must be {OUTPUT_STRIDE} for FOMONet"
         )
-    return FOMONet(
-        num_classes=len(config.dataset.class_names),
-        input_size=config.model.input_size,
-        width_multiplier=config.model.width_multiplier,
-        head_channels=config.model.head_channels,
+    if config.model.backbone == "mobilenet_v2_lite":
+        return FOMONet(
+            num_classes=len(config.dataset.class_names),
+            input_size=config.model.input_size,
+            width_multiplier=config.model.width_multiplier,
+            head_channels=config.model.head_channels,
+        )
+    if config.model.backbone == "mobilenet_v2_fomo":
+        from .mobilenet_v2_fomo import MobileNetV2FOMONet
+
+        return MobileNetV2FOMONet(
+            num_classes=len(config.dataset.class_names),
+            input_size=config.model.input_size,
+            width_multiplier=config.model.width_multiplier,
+            head_channels=config.model.head_channels,
+            output_stride=config.model.output_stride,
+            cut_point=config.model.cut_point,
+            pretrained=config.model.pretrained,
+        )
+    raise ModelConfigurationError(
+        "model.backbone must be 'mobilenet_v2_lite' or 'mobilenet_v2_fomo'"
     )
 
 

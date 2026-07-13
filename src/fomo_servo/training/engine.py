@@ -49,7 +49,7 @@ from fomo_servo.metrics import (
     foreground_micro_metrics,
 )
 from fomo_servo.postprocess import postprocess_logits
-from fomo_servo.models import build_fomo_model
+from fomo_servo.models import build_fomo_model, describe_model
 from fomo_servo.runtime import DeviceRequest
 from fomo_servo.training.class_weights import (
     ClassTrainingStatistics,
@@ -134,6 +134,7 @@ class TrainingSummary:
     augmentation_preset: Optional[str] = None
     resolved_augmentation: dict[str, Any] = field(default_factory=dict)
     augmentation_epoch_stats: tuple[dict[str, Any], ...] = ()
+    model_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -318,6 +319,7 @@ def run_training(
     set_random_seed(config.training.seed)
     runtime = create_training_runtime(config.training, device_override)
     model = prepare_model(build_fomo_model(config), runtime)
+    model_metadata = describe_model(config, model)
     train_loader, validation_loader = _build_data_loaders(config, runtime)
     train_dataset = train_loader.dataset
     if not isinstance(train_dataset, YOLOv5FOMODataset):
@@ -476,6 +478,7 @@ def run_training(
             augmentation_preset=config.augmentation.preset,
             resolved_augmentation=resolved_augmentation_dict(config.augmentation),
             augmentation_stats=train_augmentation_stats,
+            model_metadata=model_metadata,
         )
         torch.save(
             _checkpoint_payload(
@@ -555,6 +558,7 @@ def run_training(
         augmentation_preset=config.augmentation.preset,
         resolved_augmentation=resolved_augmentation_dict(config.augmentation),
         augmentation_epoch_stats=tuple(augmentation_epoch_stats),
+        model_metadata=model_metadata,
     )
     if config.experiment.name is not None:
         final_sweep_best_threshold = _record_experiment(
@@ -918,6 +922,7 @@ def _record_experiment(
             "checkpoint_centroid_recall": checkpoint.get("centroid_recall"),
             "checkpoint_centroid_f1": checkpoint.get("centroid_f1"),
             "total_training_time_seconds": summary.total_training_time_seconds,
+            "model_metadata": summary.model_metadata,
             "validation_report": validation_payload,
         }
         write_experiment_metadata(output_dir, metadata)
@@ -975,6 +980,7 @@ def _write_training_summary(summary_path: Path, summary: TrainingSummary) -> Non
         "augmentation_preset": summary.augmentation_preset,
         "resolved_augmentation": summary.resolved_augmentation,
         "augmentation_epoch_stats": list(summary.augmentation_epoch_stats),
+        "model_metadata": summary.model_metadata,
     }
     try:
         summary_path.write_text(
@@ -1090,6 +1096,7 @@ def _checkpoint_payload(
     augmentation_preset: Optional[str],
     resolved_augmentation: Mapping[str, Any],
     augmentation_stats: Mapping[str, Any],
+    model_metadata: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Capture resume state and explicit fixed-threshold selection metadata."""
 
@@ -1122,6 +1129,7 @@ def _checkpoint_payload(
         "augmentation_preset": augmentation_preset,
         "resolved_augmentation": dict(resolved_augmentation),
         "augmentation_stats": dict(augmentation_stats),
+        "model_metadata": dict(model_metadata),
     }
 
 
