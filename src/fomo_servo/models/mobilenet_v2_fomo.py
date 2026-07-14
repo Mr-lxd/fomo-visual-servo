@@ -7,6 +7,7 @@ from typing import Final
 
 import torch
 from torch import Tensor, nn
+from torch.nn import functional as F
 
 from .fomo import (
     OUTPUT_STRIDE,
@@ -53,19 +54,39 @@ class _ConvBNReLU6(nn.Sequential):
         stride: int,
         groups: int = 1,
     ) -> None:
+        self.stride = (stride, stride)
+        self.explicit_padding = (
+            (0, 1, 0, 1) if kernel_size == 3 and stride == 2 else (0, 0, 0, 0)
+        )
+        convolution_padding = (
+            0 if any(self.explicit_padding) else (kernel_size - 1) // 2
+        )
         super().__init__(
             nn.Conv2d(
                 in_channels,
                 out_channels,
                 kernel_size=kernel_size,
                 stride=stride,
-                padding=(kernel_size - 1) // 2,
+                padding=convolution_padding,
                 groups=groups,
                 bias=False,
             ),
             nn.BatchNorm2d(out_channels, eps=1e-3, momentum=0.999),
             nn.ReLU6(inplace=False),
         )
+
+    @property
+    def conv(self) -> nn.Conv2d:
+        """Return the wrapped convolution without adding a state-dict alias."""
+
+        return self[0]
+
+    def forward(self, features: Tensor) -> Tensor:
+        """Apply explicit TensorFlow-SAME padding then Conv-BN-ReLU6."""
+
+        if any(self.explicit_padding):
+            features = F.pad(features, self.explicit_padding)
+        return super().forward(features)
 
 
 class _StandardInvertedResidual(nn.Module):

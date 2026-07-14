@@ -184,6 +184,22 @@ def test_ei_backbone_preserves_keras_batchnorm_and_head_activation_contract() ->
     assert isinstance(model.head[1], nn.ReLU)
 
 
+def test_ei_stride_two_same_padding_is_right_bottom_asymmetric() -> None:
+    """Even-sized EI SAME convolutions pad one pixel on the right and bottom."""
+
+    model = MobileNetV2FOMONet(num_classes=7, input_size=192, pretrained=False)
+    stride_two_wrappers = [
+        module
+        for module in model.backbone.modules()
+        if getattr(module, "stride", None) == (2, 2)
+        and hasattr(module, "explicit_padding")
+    ]
+
+    assert len(stride_two_wrappers) == 3
+    assert all(module.explicit_padding == (0, 1, 0, 1) for module in stride_two_wrappers)
+    assert all(module.conv.padding == (0, 0) for module in stride_two_wrappers)
+
+
 def test_factory_dispatch_metadata_and_legacy_defaults(tmp_path: Path) -> None:
     new_config = load_config(_write_config(tmp_path / "new.yaml"))
     new_model = build_fomo_model(new_config)
