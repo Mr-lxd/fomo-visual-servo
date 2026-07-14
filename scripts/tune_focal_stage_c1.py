@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import sys
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -37,6 +37,7 @@ from fomo_servo.models import ModelConfigurationError, build_fomo_model, describ
 from fomo_servo.runtime import RuntimeDeviceError
 from fomo_servo.training.snapshots import (
     SnapshotError,
+    _sanitize_config,
     config_fingerprint,
     load_epoch_snapshot,
     sha256_file,
@@ -47,6 +48,7 @@ from fomo_servo.training.snapshots import (
 PROTOCOL_VERSION = "stage_c1_focal_validation_threshold_v1"
 MATCHING_DISTANCE = 0.2
 EXPECTED_SOURCE_EPOCH = 58
+PRE_STAGE_C_TRAINING_COMMIT = "82ebf19cb5946e820424cfb6077b95e1574a95d9"
 
 
 class StageC1FocalError(RuntimeError):
@@ -116,9 +118,30 @@ def run_tuning(
     source_snapshot = checkpoint.parent / "epoch_snapshots" / source_snapshot_name
     if not source_snapshot.is_file():
         raise StageC1FocalError("candidate source snapshot does not exist: {}".format(source_snapshot))
+    if str(candidate.get("source_snapshot_sha256", "")).lower() != sha256_file(source_snapshot).lower():
+        raise StageC1FocalError("candidate source snapshot SHA-256 metadata does not match")
     source_payload = load_epoch_snapshot(source_snapshot)
     expected_model_metadata = describe_model(config, build_fomo_model(config))
     expected_config = config_fingerprint(config)
+    snapshot_config_fingerprint = str(source_payload["config_fingerprint"])
+    compatibility_config_fingerprint = expected_config
+    compatibility_mode = "current_config_schema"
+    if snapshot_config_fingerprint != expected_config:
+        legacy_config = _legacy_pre_stage_c_config_fingerprint(config)
+        if snapshot_config_fingerprint != legacy_config:
+            raise StageC1FocalError(
+                "checkpoint config fingerprint differs from current and pre-Stage-C schemas"
+            )
+        if source_payload.get("git_commit_sha") != PRE_STAGE_C_TRAINING_COMMIT:
+            raise StageC1FocalError(
+                "legacy config fingerprint is only accepted for the locked focal training commit"
+            )
+        if config.loss.name != "focal_cross_entropy" or config.loss.object_weight != 1.0:
+            raise StageC1FocalError(
+                "pre-Stage-C checkpoint compatibility requires the unchanged focal loss config"
+            )
+        compatibility_config_fingerprint = legacy_config
+        compatibility_mode = "pre_stage_c_schema_without_loss_object_weight"
     content_manifest = dataset_content_manifest(
         config.dataset.root,
         config.dataset.train_split,
@@ -128,7 +151,7 @@ def run_tuning(
     validate_snapshot_compatibility(
         source_payload,
         expected_model_metadata=expected_model_metadata,
-        expected_config_fingerprint=expected_config,
+        expected_config_fingerprint=compatibility_config_fingerprint,
         expected_dataset_content_hash=expected_dataset_hash,
     )
     model, device = load_inference_model(config, checkpoint, device_request)
@@ -182,8 +205,16 @@ def run_tuning(
             "source_snapshot": str(source_snapshot),
             "source_snapshot_sha256": sha256_file(source_snapshot),
             "checkpoint_metadata_git_commit": source_payload["git_commit_sha"],
+            "config_fingerprint": snapshot_config_fingerprint,
         },
         "config_fingerprint": expected_config,
+        "checkpoint_config_fingerprint": snapshot_config_fingerprint,
+        "config_compatibility": {
+            "mode": compatibility_mode,
+            "validated_against": compatibility_config_fingerprint,
+            "legacy_pre_stage_c_fingerprint": _legacy_pre_stage_c_config_fingerprint(config),
+            "reason": "Stage C added LossConfig.object_weight; focal epoch-58 was trained before that schema field existed",
+        },
         "dataset_content_hash": expected_dataset_hash,
         "evaluation_code_commit": git_commit_sha(config.source_path.parent),
     }
@@ -244,6 +275,26 @@ def _load_mapping(path: Path) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise StageC1FocalError("checkpoint must contain a mapping")
     return payload
+
+
+def _legacy_pre_stage_c_config_fingerprint(config: object) -> str:
+    """Reproduce the locked pre-Stage-C schema fingerprint explicitly.
+
+    Stage C added ``loss.object_weight`` to the configuration dataclass.  The
+    focal baseline predates that field, so removing only this field reproduces
+    its historical fingerprint without weakening the normal compatibility
+    check for any other config or dataset mismatch.
+    """
+
+    canonical = _sanitize_config(asdict(config))
+    loss = canonical.get("loss")
+    if not isinstance(loss, dict):
+        raise StageC1FocalError("configuration loss section is not a mapping")
+    loss.pop("object_weight", None)
+    encoded = json.dumps(
+        canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _evaluate_ei_collection(
