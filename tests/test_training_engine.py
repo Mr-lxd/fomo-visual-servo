@@ -170,6 +170,20 @@ def test_ensure_finite_gradients_rejects_infinite_gradient() -> None:
         gradient_guard(model)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_cuda_mapped_resume_rng_state_restores_cpu_torch_state() -> None:
+    """CUDA-mapped checkpoints must restore the CPU RNG state without error."""
+
+    from fomo_servo.training.engine import _capture_rng_state, _restore_rng_state
+
+    state = _capture_rng_state()
+    cuda_mapped_state = dict(state)
+    cuda_mapped_state["torch"] = state["torch"].to("cuda")
+    cuda_mapped_state["cuda"] = [item.to("cuda") for item in state["cuda"]]
+
+    _restore_rng_state(cuda_mapped_state)
+
+
 def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path) -> None:
     """The fixture dataset must train for two CPU epochs, persist state, then resume."""
 

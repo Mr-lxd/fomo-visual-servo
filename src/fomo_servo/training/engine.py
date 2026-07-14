@@ -1378,6 +1378,21 @@ def _restore_rng_state(state: Any) -> None:
         raise TrainingError("resume checkpoint rng_state is incomplete")
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch"])
+    torch_state = state["torch"]
+    if not isinstance(torch_state, torch.Tensor) or torch_state.dtype != torch.uint8:
+        raise TrainingError("resume checkpoint rng_state torch state must be a ByteTensor")
+    # torch.load(map_location=device) may move this CPU RNG state to CUDA.
+    torch.set_rng_state(torch_state.detach().cpu())
     if torch.cuda.is_available() and "cuda" in state:
-        torch.cuda.set_rng_state_all(state["cuda"])
+        cuda_states = state["cuda"]
+        if not isinstance(cuda_states, (list, tuple)) or any(
+            not isinstance(item, torch.Tensor) or item.dtype != torch.uint8
+            for item in cuda_states
+        ):
+            raise TrainingError(
+                "resume checkpoint rng_state CUDA states must be ByteTensor values"
+            )
+        # CUDA RNG APIs also require CPU ByteTensor state values.
+        torch.cuda.set_rng_state_all(
+            [item.detach().cpu() for item in cuda_states]
+        )
