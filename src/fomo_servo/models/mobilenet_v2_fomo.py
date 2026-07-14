@@ -63,7 +63,7 @@ class _ConvBNReLU6(nn.Sequential):
                 groups=groups,
                 bias=False,
             ),
-            nn.BatchNorm2d(out_channels),
+            nn.BatchNorm2d(out_channels, eps=1e-3, momentum=0.999),
             nn.ReLU6(inplace=False),
         )
 
@@ -101,7 +101,7 @@ class _StandardInvertedResidual(nn.Module):
                     groups=hidden_channels,
                 ),
                 nn.Conv2d(hidden_channels, out_channels, kernel_size=1, bias=False),
-                nn.BatchNorm2d(out_channels),
+                nn.BatchNorm2d(out_channels, eps=1e-3, momentum=0.999),
             )
         )
         self.block = nn.Sequential(*layers)
@@ -157,7 +157,7 @@ class MobileNetV2FOMOBackbone(nn.Module):
                 stride=1,
                 bias=False,
             ),
-            nn.BatchNorm2d(self.output_channels),
+            nn.BatchNorm2d(self.output_channels, eps=1e-3, momentum=0.999),
             nn.ReLU6(inplace=False),
         )
 
@@ -214,7 +214,7 @@ class MobileNetV2FOMONet(nn.Module):
         self.backbone = MobileNetV2FOMOBackbone(self.width_multiplier)
         self.head = nn.Sequential(
             nn.Conv2d(self.backbone.output_channels, self.head_channels, kernel_size=1),
-            nn.ReLU6(inplace=False),
+            nn.ReLU(inplace=False),
             nn.Conv2d(self.head_channels, self.num_classes + 1, kernel_size=1),
         )
 

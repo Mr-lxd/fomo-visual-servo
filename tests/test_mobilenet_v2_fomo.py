@@ -162,6 +162,28 @@ def test_new_model_exact_shape_head_and_parameter_counts() -> None:
     assert count_trainable_parameters(model) == 19_208
 
 
+def test_ei_backbone_preserves_keras_batchnorm_and_head_activation_contract() -> None:
+    """The FOMO cut model must match EI's unfused training-time BN contract."""
+
+    model = MobileNetV2FOMONet(
+        num_classes=7,
+        input_size=192,
+        width_multiplier=0.35,
+        head_channels=32,
+        output_stride=8,
+        cut_point=BLOCK_6_EXPAND_RELU,
+        pretrained=False,
+    )
+
+    batch_norms = [
+        module for module in model.backbone.modules() if isinstance(module, nn.BatchNorm2d)
+    ]
+    assert batch_norms
+    assert all(module.eps == pytest.approx(1e-3) for module in batch_norms)
+    assert all(module.momentum == pytest.approx(0.999) for module in batch_norms)
+    assert isinstance(model.head[1], nn.ReLU)
+
+
 def test_factory_dispatch_metadata_and_legacy_defaults(tmp_path: Path) -> None:
     new_config = load_config(_write_config(tmp_path / "new.yaml"))
     new_model = build_fomo_model(new_config)
