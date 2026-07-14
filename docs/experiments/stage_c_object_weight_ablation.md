@@ -11,7 +11,31 @@ locked evaluation 已完成。未重新训练 focal baseline，未用 test 选�
 不重新训练。禁止修改七类 per-class weights、`object_weight` 之外的训练配方、
 阈值选择规则或 test 驱动的决策。
 
-实现所在提交：`d10f07e22cb80b61592f46ca963c9de8a156b612`
+Edge Impulse parity evaluator 基础实现提交：
+`d10f07e22cb80b61592f46ca963c9de8a156b612`
+
+Stage C loss、配置、训练与 snapshot 实现提交：
+`473a795da7de5fba1e0e68ebbd289c9f54184e79`
+
+本文档最后核验/更新提交：见 Git 历史中包含本次 provenance 修正的文档提交，
+不在文档内自引用该提交。
+
+## Provenance 分层
+
+以下提交角色保持明确区分，不要求四项相同：
+
+| 字段 | 本阶段含义 | 记录 |
+|---|---|---|
+| `training_code_commit` | C1–C4 正式训练开始时使用的代码提交 | `8e594831bf07754739fa06568d69272294f5d5bb` |
+| `checkpoint_metadata_git_commit` | checkpoint metadata 内实际记录的训练提交 | `8e594831bf07754739fa06568d69272294f5d5bb` |
+| `stage_c_implementation_commit` | Stage C loss、配置、训练与 snapshot 的实现提交 | `473a795da7de5fba1e0e68ebbd289c9f54184e79` |
+| `evaluation_code_commit` | Stage C.1 运行时当前 HEAD，由各个 evaluation artifact 写入 | 待 Stage C.1 执行时记录 |
+| `parity_evaluator_base_commit` | Edge Impulse parity evaluator 基础实现提交 | `d10f07e22cb80b61592f46ca963c9de8a156b612` |
+| `documentation_commit` | 本次 provenance 修正文档提交 | 见 Git 历史，不在本文档内自引用 |
+
+checkpoint metadata 中的训练提交是 `8e594831...`，它位于 Stage C 实现提交
+`473a795...` 之后，仅包含 Stage C smoke/resume 测试提交；这不改变 checkpoint
+的训练代码来源，也不表示需要重新训练。
 
 ## loss 语义审计
 
