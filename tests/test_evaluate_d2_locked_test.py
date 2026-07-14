@@ -144,3 +144,49 @@ def test_threshold_artifact_reads_split_from_artifact_root() -> None:
             },
         }
     )
+
+
+def test_markdown_report_renders_normalized_localization_rows() -> None:
+    module = _script_module()
+    protocol = {
+        "protocol": "d2_locked_test_v1",
+        "selected_epoch": 40,
+        "selected_threshold": 0.4,
+        "threshold_source": "validation",
+        "test_split": "test",
+        "dtype": "float32",
+        "candidate_count": 1,
+    }
+    provenance = {
+        "cleaning_hashes": {
+            "cleaning_view_hash": "a",
+            "cleaned_test_view_hash": "b",
+        },
+        "evaluator_code_commit": "c",
+    }
+    row = {
+        "evaluator": "edge_impulse_legacy",
+        "true_positives": 1,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "macro_f1": 1.0,
+        "prediction_count": 1,
+        "ground_truth_count": 1,
+        "mean_absolute_count_error": 0.0,
+        "mean_count_bias": 0.0,
+        "mean_localization_error_pixels": None,
+        "mean_localization_error_normalized": 0.2,
+    }
+
+    rendered = module._markdown_report(
+        protocol=protocol,
+        provenance=provenance,
+        rows=[row],
+        class_rows=[],
+        confidence_distributions={},
+    )
+
+    assert "normalized=0.2" in rendered

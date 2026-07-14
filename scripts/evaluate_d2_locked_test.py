@@ -440,11 +440,12 @@ def _markdown_report(
         localization = row["mean_localization_error_pixels"]
         if localization is None:
             localization = "n/a; normalized=" + str(row["mean_localization_error_normalized"])
-        lines.append(
-            "| {evaluator} | {true_positives} | {false_positives} | {false_negatives} | {precision:.6f} | {recall:.6f} | {f1:.6f} | {macro_f1:.6f} | {prediction_count} | {ground_truth_count} | {mean_absolute_count_error:.6f} | {mean_count_bias:.6f} | {localization} |".format(
-                **row
+            lines.append(
+                "| {evaluator} | {true_positives} | {false_positives} | {false_negatives} | {precision:.6f} | {recall:.6f} | {f1:.6f} | {macro_f1:.6f} | {prediction_count} | {ground_truth_count} | {mean_absolute_count_error:.6f} | {mean_count_bias:.6f} | {localization} |".format(
+                    localization=localization,
+                    **row
+                )
             )
-        )
     lines.extend(["", "## Per-class F1", "", "| evaluator | class | precision | recall | F1 |", "|---|---|---:|---:|---:|"])
     for row in class_rows:
         lines.append(
