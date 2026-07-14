@@ -1,0 +1,49 @@
+{
+  "protocol": "stage_d2_multiseed_config_diff_v1",
+  "base": "configs/experiments/stage_d2_fomo_ei_w100_pretrained.yaml",
+  "variants": [
+    {
+      "name": "seed123",
+      "config": "configs/experiments/stage_d2_multiseed_seed123.yaml",
+      "allowed_changes": {
+        "project.name": "stage_d2_multiseed_seed123",
+        "training.seed": 123,
+        "training.output_dir": "outputs/experiments/stage_d2_multiseed_seed123",
+        "experiment.name": "stage_d2_multiseed_seed123"
+      }
+    },
+    {
+      "name": "seed2027",
+      "config": "configs/experiments/stage_d2_multiseed_seed2027.yaml",
+      "allowed_changes": {
+        "project.name": "stage_d2_multiseed_seed2027",
+        "training.seed": 2027,
+        "training.output_dir": "outputs/experiments/stage_d2_multiseed_seed2027",
+        "experiment.name": "stage_d2_multiseed_seed2027"
+      }
+    }
+  ],
+  "locked_fields": [
+    "dataset",
+    "postprocess",
+    "evaluation",
+    "model",
+    "augmentation",
+    "loss",
+    "training.device",
+    "training.amp",
+    "training.amp_initial_scale",
+    "training.num_workers",
+    "training.pin_memory",
+    "training.batch_size",
+    "training.epochs",
+    "training.early_stopping_patience",
+    "training.early_stopping_min_delta",
+    "training.checkpoint_criterion",
+    "training.epoch_snapshots",
+    "training.optimizer",
+    "training.scheduler",
+    "export",
+    "experiment.summary_csv"
+  ]
+}
