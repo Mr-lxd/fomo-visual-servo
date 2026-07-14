@@ -20,8 +20,10 @@ Test
 - `threshold_tuning_independent: false`。这不是把 validation tuning 描述成
   数据泄漏，而是明确记录 validation 同时承担 checkpoint selection 和 threshold
   tuning；test 完全隔离，只用于锁定后的最终评价。
-- `best_centroid_pr_auc_macro.pt` 是主 candidate；Stage B 正式流程固定使用
-  validation selection 得到的 epoch 58 candidate。
+- `best_centroid_pr_auc_macro.pt` 是主 candidate；当前 D2 正式流程固定使用
+  validation selection 得到的 seed42 epoch 40 candidate，threshold 为 `0.40`。
+- Stage C/C.1 的 epoch 58 focal 结果属于历史基线，只能按其当时的 locked
+  protocol 解读，不应与当前 D2 candidate 混写。
 - test 禁止 threshold sweep、自动阈值搜索和多 checkpoint 比较。
 
 ## 阈值字段

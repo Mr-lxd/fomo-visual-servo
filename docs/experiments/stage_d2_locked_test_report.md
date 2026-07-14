@@ -44,7 +44,7 @@ checkpoint 与 EI float32 TFLite 的 bitwise 输出复现：D2 的 FOMO head/cla
 | protocol JSON SHA-256 | `202abb0c9f183f2dd3a71d81c2a4bcd114f6e12470b2dad1f41bc21d23c32ddc` |
 
 The complete machine-readable report is
-[`final_test_metrics_d2.json`](../../outputs/experiments/stage_d2_fomo_ei_w100_pretrained/locked_test_d2/final_test_metrics_d2.json)
+`outputs/experiments/stage_d2_fomo_ei_w100_pretrained/locked_test_d2/final_test_metrics_d2.json`
 （该输出目录按实验策略保持 ignored，不进入 Git）。CSV 和逐图片 match 记录也
 保存在同一目录的 `final_test_metrics_d2.csv`、`per_class_test_d2.csv` 和
 `metrics.images` 字段中。

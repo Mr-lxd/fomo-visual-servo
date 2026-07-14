@@ -29,11 +29,16 @@ dist/
 *.pt
 *.pth
 *.ckpt
+*.h5
+*.hdf5
+*.zip
 *.onnx
 *.ort
 *.engine
 *.tflite
 *.log
+/cache/
+/inference_cache/
 
 # Local datasets and exported media
 /data/

@@ -432,7 +432,7 @@ In the same PowerShell process, set the temporary dataset environment variable
 and run:
 
 ```powershell
-$env:FOMO_DATASET_ROOT="C:\Users\laixindong\Desktop\archive\aquarium_pretrain"
+$env:FOMO_DATASET_ROOT="<DATASET_ROOT>"
 conda run --no-capture-output -n fomo-servo-train `
   python -u scripts/train.py `
   --config configs/experiments/_tmp_model01_smoke.yaml `

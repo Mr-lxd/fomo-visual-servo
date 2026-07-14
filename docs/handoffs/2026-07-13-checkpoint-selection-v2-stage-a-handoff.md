@@ -8,7 +8,7 @@
 
 ### 仓库、目标和研究问题
 
-- 本地仓库：D:\DL_Project\fomo-visual-servo
+- 本地仓库：`<REPO_ROOT>`
 - GitHub 远程：https://github.com/Mr-lxd/fomo-visual-servo.git
 - 项目目标：建立可修改、可训练、可导出、最终部署到 Raspberry Pi 5 的 PyTorch FOMO 项目，用于轻量化水下目标视觉伺服。
 - 当前研究问题：旧 best_centroid_f1.pt 按 fixed threshold=0.5 选择；训练后 threshold sweep 可能发现另一个 epoch 或 threshold 更优。因此 checkpoint selection、threshold calibration、final test evaluation 必须分离。
@@ -17,9 +17,9 @@
 
 - Windows 笔记本，Python 3.10，PyTorch CUDA 训练环境；最终部署为 Raspberry Pi 5 + ONNX Runtime CPU。
 - dataset 根目录由环境变量 FOMO_DATASET_ROOT 提供，源码和 YAML 不写死本机绝对路径。
-- 本次检查的 PowerShell 进程中 FOMO_DATASET_ROOT 未设置；明确检查的 C:\Users\laixindong\Desktop\archive\aquarium_pretrain 存在，包含 train、valid、test、data.yaml。后续命令需在同一进程设置：
+- 本次检查的 PowerShell 进程中 FOMO_DATASET_ROOT 未设置；当时使用的本地数据根目录包含 train、valid、test、data.yaml。后续命令需在同一进程设置：
 ~~~powershell
-$env:FOMO_DATASET_ROOT="C:\Users\laixindong\Desktop\archive\aquarium_pretrain"
+$env:FOMO_DATASET_ROOT="<DATASET_ROOT>"
 ~~~
 - dataset content hash：
   0576cb20e7adb94e0d57db4a44ce226cc7ad75cd366259e4366380e5d7e25562
@@ -36,7 +36,7 @@ $env:FOMO_DATASET_ROOT="C:\Users\laixindong\Desktop\archive\aquarium_pretrain"
 
 所有 Git 命令均使用：
 ~~~powershell
-git -c safe.directory=D:/DL_Project/fomo-visual-servo <command>
+git -c safe.directory=<REPO_ROOT> <command>
 ~~~
 
 实际结果：
@@ -221,7 +221,7 @@ snapshot/candidate 均在目标目录写临时文件，执行 flush、os.fsync �
 ~~~powershell
 conda run --no-capture-output -n fomo-servo-train python -m pytest -q
 conda run --no-capture-output -n fomo-servo-train python -m compileall src scripts
-git -c safe.directory=D:/DL_Project/fomo-visual-servo diff --check
+git -c safe.directory=<REPO_ROOT> diff --check
 ~~~
 
 实际结果：212 passed, 4 skipped, 16 warnings；compileall 成功；diff check 成功。4 个 skipped 是因缺少 onnx 和 onnxruntime，不能写成 passed。
@@ -352,7 +352,7 @@ outputs/experiments/model01_mobilenet_v2_fomo_aug03/last.pt
 下面内容可直接复制到全新的 ChatGPT/Codex 会话：
 
 ~~~text
-仓库：D:\DL_Project\fomo-visual-servo
+仓库：`<REPO_ROOT>`
 
 请先阅读：
 1. AGENTS.md

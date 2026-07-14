@@ -4,7 +4,7 @@
 
 ## 公平比较协议
 
-最可靠的当前比较固定为：同一 63 张本地 `test` 图像、FP32、阈值 `0.5`、相同的 `parity-clean-v1` 标签视图。`threshold=0.35` 是 epoch 58 在本地 validation 上已锁定的工作点，仅报告工程工作点，不参与 EI parity 或 checkpoint 选择。
+本文是历史 epoch58 与 Edge Impulse TFLite 的 parity 审计，最可靠的比较固定为：同一 63 张本地 `test` 图像、FP32、阈值 `0.5`、相同的 `parity-clean-v1` 标签视图。`threshold=0.35` 是 epoch 58 在本地 validation 上已锁定的工作点，仅报告工程工作点，不参与当前 D2 candidate 或 checkpoint 选择。
 
 ## Confirmed
 
@@ -23,7 +23,7 @@
 | train / valid | 未移除任何 bbox；train 的一个空标签是合法无目标样本 |
 | 未发现 | 越界、NaN/Inf、非法 class id、重复 bbox、缺失标签、额外字段/数值错误 |
 
-异常原始行、标签 SHA-256、清洗后标签 SHA-256 和行号在 [parity-clean-v1.json](../../outputs/parity_audit/edge_impulse_parity_v1_hashscope/parity-clean-v1.json) 中。实际审计记录位于 [invalid_label_audit.json](../../outputs/parity_audit/edge_impulse_parity_v1_hashscope/invalid_label_audit.json) 与 [CSV](../../outputs/parity_audit/edge_impulse_parity_v1_hashscope/invalid_label_audit.csv)。
+异常原始行、标签 SHA-256、清洗后标签 SHA-256 和行号记录在本地生成的 `outputs/parity_audit/edge_impulse_parity_v1_hashscope/parity-clean-v1.json` 中。实际审计记录位于同一输出目录的 `invalid_label_audit.json` 与 `invalid_label_audit.csv`；这些 ignored outputs 不作为 GitHub 链接发布，可由对应脚本重新生成。
 
 | 视图 | SHA-256 |
 | --- | --- |
@@ -34,7 +34,7 @@
 
 ### Edge Impulse ZIP 与实际 TFLite contract
 
-精确检查的文件是 `C:\Users\laixindong\Downloads\lxd992712186-project-1-cpp-mcu-v2-impulse-#1.zip`（PowerShell 路径操作均使用 `-LiteralPath`）。
+精确检查的文件是用户本地的 `<EI_EXPORT_ZIP>`（PowerShell 路径操作均使用 `-LiteralPath`）；真实用户目录不写入仓库文档。
 
 | 项目 | 实测值 |
 | --- | --- |
@@ -82,9 +82,9 @@
 每个报告含 TP/FP/FN、non-background 聚合 P/R/F1、macro F1、per-class F1、prediction/GT count、定位与计数统计、以及逐图片匹配。
 TFLite 报告还保存逐图 `.npy` 原始 probability tensor、zero-pad 预处理图、激活 cell 与融合质心；后续使用 `--raw-output-cache <此前输出目录>` 会在模型 SHA、cleaning hash、阈值和完整 63 图集合一致时复用这些 tensor，不再次调用 TFLite。
 
-- 本地 epoch 58、0.5：[report](../../outputs/parity_audit/edge_impulse_parity_v1_hashscope/local_epoch58_threshold_050/parity_report.json)
-- 本地 epoch 58、locked 0.35：[report](../../outputs/parity_audit/edge_impulse_parity_v1_hashscope/local_epoch58_threshold_035/parity_report.json)
-- EI float32 TFLite、0.5：[report](../../outputs/parity_audit/edge_impulse_parity_v1_hashscope/edge_impulse_tflite_threshold_050_dsp_rgb01/parity_report.json)
+- 本地 epoch 58、0.5：`outputs/parity_audit/edge_impulse_parity_v1_hashscope/local_epoch58_threshold_050/parity_report.json`
+- 本地 epoch 58、locked 0.35：`outputs/parity_audit/edge_impulse_parity_v1_hashscope/local_epoch58_threshold_035/parity_report.json`
+- EI float32 TFLite、0.5：`outputs/parity_audit/edge_impulse_parity_v1_hashscope/edge_impulse_tflite_threshold_050_dsp_rgb01/parity_report.json`
 
 ### 2×2：cleaned test、FP32、threshold=0.5
 

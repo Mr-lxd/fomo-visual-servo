@@ -2,7 +2,7 @@
 
 面向水下目标视觉伺服的轻量化 PyTorch FOMO 项目。训练与开发目标是 Windows，最终部署目标是 Raspberry Pi 5 上的 ONNX Runtime CPU。
 
-当前仓库已包含 YAML 配置加载、YOLOv5 数据读取与 stride-8 heatmap 标签生成、MobileNetV2-lite FOMO 模型，以及 CPU/CUDA 训练和验证流程。预测和正式 ONNX 导出脚本仍未实现。
+当前仓库已包含 YAML 配置加载、YOLOv5 数据读取与 stride-8 heatmap 标签生成、MobileNetV2-lite FOMO 模型、CPU/CUDA 训练验证、图片/视频推理和固定尺寸 ONNX 导出接口。ONNX 与 ONNX Runtime 属于可选依赖，Raspberry Pi 5 的实际延迟和功耗仍未实测。
 
 ## 环境边界
 
@@ -205,7 +205,7 @@ training:
 
 每个 epoch 会记录 `train_loss`、`val_loss`、网格级指标和固定阈值下的 centroid 指标到 `<output_dir>/history.csv`。始终保存 `<output_dir>/last.pt`，并分别按固定 `evaluation.checkpoint_threshold` 保存 `best_grid_f1.pt` 与 `best_centroid_f1.pt`；`best_val_f1.pt` 是当前 `training.checkpoint_criterion` 对应文件的兼容别名。checkpoint 含模型、优化器、scheduler、AMP scaler、随机状态、选择指标和选择阈值，因此可从 `last.pt` 继续训练。
 
-推理阈值与 checkpoint 选择阈值严格分离：`postprocess.inference_threshold` 供图片/视频推理默认使用，`evaluation.checkpoint_threshold` 只用于每个 epoch 的 legacy 固定阈值指标。当前默认的 checkpoint selection v2 采用 Train/Validation/Test 三划分协议：Validation 先按 `centroid_pr_auc_macro` 选择主 candidate，再在同一 Validation split 上按 `centroid_f1` 调整 threshold；Test 只读取锁定的 epoch 58 candidate 和 validation threshold，禁止 sweep、自动搜索或比较多个 checkpoint。详细协议见 [docs/threshold_protocol.md](docs/threshold_protocol.md)。旧配置中的 `postprocess.confidence_threshold` 仍可加载，但会发出弃用警告，并且只映射为推理阈值。
+推理阈值与 checkpoint 选择阈值严格分离：`postprocess.inference_threshold` 供图片/视频推理默认使用，`evaluation.checkpoint_threshold` 只用于每个 epoch 的 legacy 固定阈值指标。当前正式 D2 候选为 seed42 的 epoch40 snapshot，validation threshold 为 `0.40`；它由 validation `centroid_pr_auc_macro` 选择 epoch，再在同一 validation split 上选择 threshold。Test 只读取锁定的 D2 epoch40 candidate 和 validation threshold，禁止 sweep、自动搜索或比较多个 checkpoint。历史 C1/C2 epoch58 结果只用于阶段比较，不是当前候选。详细协议见 [docs/threshold_protocol.md](docs/threshold_protocol.md)。旧配置中的 `postprocess.confidence_threshold` 仍可加载，但会发出弃用警告，并且只映射为推理阈值。
 
 正式 Stage B 流程使用 `scripts/tune_validation_threshold.py` 生成 `threshold_tuning.json` 和 `locked_test_protocol.json`，再使用 `scripts/evaluate_locked_test.py` 输出一次 `final_test_metrics.json` 与 `final_test_metrics.csv`。独立 calibration split 仍可作为高级可选模式，但不是默认要求。
 
@@ -278,3 +278,12 @@ python scripts/predict_video.py `
 ```
 
 `normalized_x/y` 使用原图像素坐标归一化到 `[-1,1]`；左/上为负，右/下为正。视频中的 jitter、availability、loss rate 和 reacquisition 是运行稳定性统计，不是 MOT 身份跟踪指标。
+
+## 当前正式候选与实验索引
+
+- 当前模型候选：MobileNetV2 FOMO、alpha `0.35`、输入 `192×192 RGB`、输出 `[B,8,24,24]`、stride `8`、Edge Impulse pretrained backbone、seed `42`、epoch `40`、threshold `0.40`。
+- D2 validation multi-seed Strict F1：`0.418215 ± 0.005413`（seed `42/123/2027`，sample std，validation-only）。
+- D2 seed42 locked-test Strict F1：`0.451977`；EI legacy F1：`0.484959`。EI legacy 只用于 Edge Impulse parity，不是正式主指标。
+- pretrained H5 来源：Edge Impulse transfer-learning CDN 的 [Keras MobileNetV2 artifact](https://cdn.edgeimpulse.com/transfer-learning-weights/keras/mobilenet_v2_weights_tf_dim_ordering_tf_kernels_0.35_96.h5)，仅用于 backbone initialization；SHA-256 为 `a94030b8c5e6811c60b93c8b6888d2f309dc112008bd14f0963e8c5473201c2c`。来源审计见 [D1.1 pretrained source audit](docs/experiments/stage_d1_1_architecture_parity.md)。H5 未提交，license/redistribution status requires confirmation，不从本仓库或 GitHub Release 重新分发。
+- dataset、checkpoint、H5、TFLite、ONNX、ZIP 和 outputs 均不在 Git 仓库中；配置通过 `FOMO_DATASET_ROOT` 与 `FOMO_PRETRAINED_WEIGHTS` 指向本地文件。
+- 评估协议、阶段结论和 provenance 索引见 [docs/experiments/README.md](docs/experiments/README.md)；候选模型限制见 [docs/model_card_d2_seed42.md](docs/model_card_d2_seed42.md)；发布前审计见 [docs/release_preflight_report.md](docs/release_preflight_report.md)。
