@@ -1,6 +1,7 @@
 # Stage C：EI-style object-weight controlled ablation
 
-状态：实现已完成，正式 C1–C4 训练结果待按锁定顺序生成。
+状态：C1–C4 正式训练、validation-only selection 和唯一 candidate 的 cleaned-test
+locked evaluation 已完成。未重新训练 focal baseline，未用 test 选择 object weight。
 
 ## 目的与边界
 
@@ -96,7 +97,48 @@ baseline 作为比较项。
 
 | experiment | loss | object weight | selected epoch | validation threshold | strict P/R/F1 | EI legacy P/R/F1 | macro F1 | count MAE |
 |---|---|---:|---:|---:|---|---|---:|---:|
-| C1 | weighted_softmax_ce | 1 | pending | pending | pending | pending | pending | pending |
-| C2 | ei_weighted_xent_legacy | 10 | pending | pending | pending | pending | pending | pending |
-| C3 | ei_weighted_xent_legacy | 30 | pending | pending | pending | pending | pending | pending |
-| C4 | ei_weighted_xent_legacy | 100 | pending | pending | pending | pending | pending | pending |
+| C1 | weighted_softmax_ce | 1 | 58 | 0.10 | 0.5309/0.2365/0.3272 | 0.5654/0.2473/0.3441 | 0.2034 | 4.8032 |
+| C2 | ei_weighted_xent_legacy | 10 | 49 | 0.10 | 0.4581/0.3003/0.3628 | 0.5218/0.3260/0.4013 | 0.2572 | 4.4331 |
+| C3 | ei_weighted_xent_legacy | 30 | 59 | 0.20 | 0.4842/0.2860/0.3596 | 0.5363/0.3054/0.3892 | 0.2583 | 4.8346 |
+| C4 | ei_weighted_xent_legacy | 100 | 59 | 0.35 | 0.4459/0.3036/0.3613 | 0.5057/0.3291/0.3987 | 0.3270 | 4.5197 |
+
+表中 P/R/F1 是 validation 指标。主选择规则是 validation strict centroid F1：
+C2=0.362791 高于 C4=0.361257、C3=0.359613 和 C1=0.327245，因此唯一选择
+C2；C4 的 EI legacy validation F1 较高不能改变 primary candidate。
+
+## Locked test
+
+唯一 candidate：
+
+- config：`configs/experiments/loss_ei_object_w10.yaml`
+- snapshot：`epoch_049_weights.pt`
+- snapshot SHA-256：`654f7c7bfec82e9f00041b75f0dc3e24853ea28fc11bfef19862f5590937033b`
+- validation-locked threshold：`0.10`
+- cleaning view：`parity-clean-v1`
+- cleaned test：63 images，582 GT
+
+| evaluator | TP/FP/FN | P | R | F1 | macro F1 | predictions | GT | count MAE |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| local current | 136/226/446 | 0.3757 | 0.2337 | 0.2881 | 0.2156 | 362 | 582 | 5.2698 |
+| strict one-to-one | 173/187/409 | 0.4806 | 0.2973 | 0.3673 | 0.2729 | 360 | 582 | 5.3016 |
+| EI legacy | 192/168/412 | 0.5333 | 0.3179 | 0.3983 | 0.2911 | 360 | 582 | 5.3016 |
+
+既有 focal epoch58@0.50 cleaned-test baseline 是：strict F1 `0.2781`
+（99/31/483，P=0.7615，R=0.1701），EI legacy F1 `0.2897`
+（104/26/484，P=0.8000，R=0.1769）。因此 C2 w10 的 locked-test 改变为更高
+recall 和更多 prediction：strict F1 +0.0892、EI legacy F1 +0.1086；precision
+下降是 object weight 提高 foreground 召回的直接代价。test 结果仅用于报告，未用于
+改变 candidate、threshold 或 object weight。
+
+Edge Impulse Studio 当前截图 float32 test 参考为 P=0.63、R=0.36、F1=0.46。
+C2 的 EI legacy test 为 P=0.5333、R=0.3179、F1=0.3983，差距分别为
+`-0.0967`、`-0.0421`、`-0.0617`。这说明 object-weight ablation 缩小了召回侧
+差距，但尚未达到 Studio 结果；仍需将差异分解为模型/训练配方、preprocessing、
+解码和 Studio 后端实现差异，不能把 legacy many-to-one 的增益当作模型本身增益。
+
+## 产物位置
+
+正式训练输出位于 `outputs/experiments/stage_c_loss_*`，每组有 60 个
+`epoch_snapshots`。validation-only 汇总位于各组的
+`validation_scan/stage_c_validation_summary.json`；locked test 仅位于 C2 的
+`locked_test_threshold_010/parity_report.json`。这些 outputs 被排除在 Git 提交之外。

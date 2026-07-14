@@ -94,6 +94,18 @@ def test_configured_object_weight_is_not_stacked_with_per_class_weights(
         _config(object_weight=object_weight, class_weights=(1.0, 3.0, 7.0))
     )(logits, targets)
     torch.testing.assert_close(without_class_weights, with_class_weights)
+    exact_weights = build_classification_loss(
+        _config(object_weight=object_weight)
+    ).target_cell_weights(targets)
+    assert exact_weights[0, 0, 1].item() == pytest.approx(object_weight)
+
+
+def test_multiclass_batch_assigns_the_same_object_weight_to_each_foreground_class() -> None:
+    logits = torch.zeros((2, 4, 1, 1), dtype=torch.float32)
+    targets = torch.tensor([[[1]], [[3]]], dtype=torch.int64)
+    weights = build_classification_loss(_config(object_weight=30.0)).target_cell_weights(targets)
+    assert weights.shape == (2, 1, 1)
+    assert weights.flatten().tolist() == [30.0, 30.0]
 
 
 def test_object_weight_mode_rejects_focal_gamma() -> None:
