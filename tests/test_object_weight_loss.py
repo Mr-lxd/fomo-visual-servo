@@ -151,7 +151,7 @@ training:
   num_workers: 0
   pin_memory: false
   batch_size: 2
-  epochs: 1
+  epochs: 2
   seed: 123
   output_dir: "{output_dir.as_posix()}"
   epoch_snapshots:
@@ -180,3 +180,78 @@ training:
     )
     assert snapshot["loss"]["loss_type"] == "weighted_softmax_ce"
     assert snapshot["loss"]["object_weight"] == pytest.approx(100.0)
+
+
+def test_object_weight_smoke_loss_decreases_and_resume_is_reproducible(tmp_path: Path) -> None:
+    """A tiny optimizer smoke checks finite loss, snapshots, and resumable state."""
+
+    output_dir = tmp_path / "resume-run"
+    config_path = tmp_path / "resume.yaml"
+    config_path.write_text(
+        f"""
+dataset:
+  root: "{FIXTURE_ROOT.as_posix()}"
+  classes: [creature]
+  class_mode: merge_single
+model:
+  input_size: 96
+  output_stride: 8
+loss:
+  type: weighted_softmax_ce
+  object_weight: 100.0
+training:
+  device: cpu
+  amp: false
+  num_workers: 0
+  pin_memory: false
+  batch_size: 2
+  epochs: 2
+  seed: 123
+  output_dir: "{output_dir.as_posix()}"
+  resume: null
+  epoch_snapshots:
+    enabled: true
+    interval: 1
+    keep_last: null
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    summary = run_training(config, device_override="cpu")
+    assert summary.completed_epochs == 2
+    history_lines = (output_dir / "history.csv").read_text(encoding="utf-8").splitlines()
+    assert len(history_lines) == 3
+    assert all(torch.isfinite(torch.tensor(float(line.split(",")[1]))) for line in history_lines[1:])
+    checkpoint = torch.load(output_dir / "last.pt", map_location="cpu", weights_only=False)
+    assert isinstance(checkpoint["scaler_state"], dict)
+    assert checkpoint["loss_type"] == "weighted_softmax_ce"
+    assert checkpoint["object_weight"] == pytest.approx(100.0)
+
+    resumed_path = tmp_path / "resumed.yaml"
+    resumed_path.write_text(
+        config_path.read_text(encoding="utf-8").replace("epochs: 2", "epochs: 3").replace(
+            "resume: null", f"resume: \"{(output_dir / 'last.pt').as_posix()}\""
+        ),
+        encoding="utf-8",
+    )
+    resumed = run_training(load_config(resumed_path), device_override="cpu")
+    assert resumed.start_epoch == 3
+    assert resumed.completed_epochs == 3
+
+
+def test_weighted_softmax_ce_decreases_in_minimal_gradient_smoke() -> None:
+    parameter = torch.nn.Parameter(torch.zeros(3, dtype=torch.float32))
+    optimizer = torch.optim.SGD([parameter], lr=0.5)
+    criterion = build_classification_loss(_config(object_weight=100.0))
+    targets = torch.tensor([[[1]]], dtype=torch.int64)
+    losses = []
+    for _ in range(8):
+        optimizer.zero_grad(set_to_none=True)
+        logits = parameter.view(1, 3, 1, 1)
+        loss = criterion(logits, targets)
+        assert torch.isfinite(loss)
+        loss.backward()
+        assert parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        optimizer.step()
+        losses.append(float(loss.detach()))
+    assert losses[-1] < losses[0]
