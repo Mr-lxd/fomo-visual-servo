@@ -47,6 +47,8 @@ class ModelConfig:
     head_channels: int
     cut_point: str = "lite_stride8_output"
     pretrained: bool = False
+    pretrained_source: Optional[Path] = None
+    pretrained_sha256: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -419,6 +421,17 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     pretrained = _optional_boolean(
         model_mapping, "pretrained", False, "model"
     )
+    pretrained_source = _optional_nullable_path(
+        model_mapping, "pretrained_source", "model"
+    )
+    pretrained_sha256 = _optional_nullable_text(
+        model_mapping, "pretrained_sha256", None, "model"
+    )
+    if pretrained_sha256 is not None:
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", pretrained_sha256):
+            raise ConfigurationError(
+                "model.pretrained_sha256 must be a 64-character hexadecimal SHA-256 string"
+            )
     expected_cut_points = {
         "mobilenet_v2_lite": "lite_stride8_output",
         "mobilenet_v2_fomo": "block_6_expand_relu",
@@ -429,10 +442,21 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             f"model.cut_point must be '{expected_cut_point}' for "
             f"model.backbone='{backbone}'"
         )
-    if pretrained:
+    if pretrained and backbone != "mobilenet_v2_fomo":
         raise ConfigurationError(
-            "model.pretrained must be false because no pretrained source or "
-            "download path is configured"
+            "model.pretrained is supported only for model.backbone='mobilenet_v2_fomo'"
+        )
+    if pretrained and pretrained_source is None:
+        raise ConfigurationError(
+            "model.pretrained_source is required when model.pretrained is true"
+        )
+    if pretrained and pretrained_sha256 is None:
+        raise ConfigurationError(
+            "model.pretrained_sha256 is required when model.pretrained is true"
+        )
+    if not pretrained and (pretrained_source is not None or pretrained_sha256 is not None):
+        raise ConfigurationError(
+            "model.pretrained_source and model.pretrained_sha256 require model.pretrained=true"
         )
 
     augmentation = _parse_augmentation_config(
@@ -812,6 +836,8 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             head_channels=head_channels,
             cut_point=cut_point,
             pretrained=pretrained,
+            pretrained_source=pretrained_source,
+            pretrained_sha256=pretrained_sha256.lower() if pretrained_sha256 else None,
         ),
         loss=LossConfig(
             name=loss_name,

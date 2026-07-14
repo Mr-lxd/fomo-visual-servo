@@ -1,0 +1,65 @@
+{
+  "base_config": "configs/experiments/stage_d1_fomo_ei_w100.yaml",
+  "candidate_config": "configs/experiments/stage_d2_fomo_ei_w100_pretrained.yaml",
+  "allowed_changes": {
+    "project.name": {
+      "base": "stage_d1_fomo_ei_w100",
+      "candidate": "stage_d2_fomo_ei_w100_pretrained"
+    },
+    "model.pretrained": {
+      "base": null,
+      "base_effective": false,
+      "candidate": true
+    },
+    "model.pretrained_source": {
+      "base": null,
+      "candidate": "${FOMO_PRETRAINED_WEIGHTS}"
+    },
+    "model.pretrained_sha256": {
+      "base": null,
+      "candidate": "a94030b8c5e6811c60b93c8b6888d2f309dc112008bd14f0963e8c5473201c2c"
+    },
+    "training.output_dir": {
+      "base": "outputs/experiments/stage_d1_fomo_ei_w100",
+      "candidate": "outputs/experiments/stage_d2_fomo_ei_w100_pretrained"
+    },
+    "experiment.name": {
+      "base": "stage_d1_fomo_ei_w100",
+      "candidate": "stage_d2_fomo_ei_w100_pretrained"
+    }
+  },
+  "locked_sections": [
+    "dataset",
+    "postprocess",
+    "evaluation",
+    "model.backbone",
+    "model.width_multiplier",
+    "model.head_channels",
+    "model.input_size",
+    "model.output_stride",
+    "augmentation",
+    "loss",
+    "training.device",
+    "training.amp",
+    "training.amp_initial_scale",
+    "training.num_workers",
+    "training.pin_memory",
+    "training.batch_size",
+    "training.epochs",
+    "training.seed",
+    "training.resume",
+    "training.early_stopping_patience",
+    "training.early_stopping_min_delta",
+    "training.checkpoint_criterion",
+    "training.epoch_snapshots",
+    "training.optimizer",
+    "training.scheduler",
+    "export",
+    "experiment.summary_csv"
+  ],
+  "weights_source": {
+    "identity": "ei_keras_mobilenet_v2_035_96",
+    "sha256": "a94030b8c5e6811c60b93c8b6888d2f309dc112008bd14f0963e8c5473201c2c",
+    "head_policy": "new PyTorch initialization; no H5 head/classifier tensors loaded"
+  }
+}

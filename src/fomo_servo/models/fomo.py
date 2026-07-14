@@ -261,6 +261,8 @@ def build_fomo_model(config: ProjectConfig) -> nn.Module:
             output_stride=config.model.output_stride,
             cut_point=config.model.cut_point,
             pretrained=config.model.pretrained,
+            pretrained_source=config.model.pretrained_source,
+            pretrained_sha256=config.model.pretrained_sha256,
         )
     raise ModelConfigurationError(
         "model.backbone must be 'mobilenet_v2_lite' or 'mobilenet_v2_fomo'"

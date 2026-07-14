@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
+from pathlib import Path
+from typing import Final, Optional
 
 import torch
 from torch import Tensor, nn
@@ -203,6 +204,8 @@ class MobileNetV2FOMONet(nn.Module):
         output_stride: int = OUTPUT_STRIDE,
         cut_point: str = BLOCK_6_EXPAND_RELU,
         pretrained: bool = False,
+        pretrained_source: Optional[Path] = None,
+        pretrained_sha256: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.num_classes = _require_positive_integer("num_classes", num_classes)
@@ -225,10 +228,6 @@ class MobileNetV2FOMONet(nn.Module):
             )
         if not isinstance(pretrained, bool):
             raise ModelConfigurationError("pretrained must be a boolean")
-        if pretrained:
-            raise ModelConfigurationError(
-                "pretrained=true is unsupported: no pretrained source or download path is configured"
-            )
         self.output_stride = OUTPUT_STRIDE
         self.cut_point = cut_point
         self.pretrained = pretrained
@@ -238,6 +237,25 @@ class MobileNetV2FOMONet(nn.Module):
             nn.ReLU(inplace=False),
             nn.Conv2d(self.head_channels, self.num_classes + 1, kernel_size=1),
         )
+        self.pretrained_load_report = None
+        self.initialization = "pytorch_module_defaults"
+        if pretrained:
+            if pretrained_source is None or pretrained_sha256 is None:
+                raise ModelConfigurationError(
+                    "pretrained=true requires pretrained_source and pretrained_sha256"
+                )
+            from .pretrained import (
+                PretrainedWeightsError,
+                load_ei_mobilenet_v2_backbone,
+            )
+
+            try:
+                self.pretrained_load_report = load_ei_mobilenet_v2_backbone(
+                    self, pretrained_source, pretrained_sha256
+                )
+            except PretrainedWeightsError as error:
+                raise ModelConfigurationError(str(error)) from error
+            self.initialization = "ei_keras_mobilenet_v2_035_96"
 
     def forward(self, images: Tensor) -> Tensor:
         """Return raw logits for float32 RGB images `[B,3,S,S]`."""

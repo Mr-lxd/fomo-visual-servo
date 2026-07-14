@@ -27,11 +27,14 @@ def describe_model(config: ProjectConfig, model: nn.Module) -> dict[str, Any]:
         "output_stride": config.model.output_stride,
         "head_channels": config.model.head_channels,
         "pretrained": config.model.pretrained,
-        "initialization": "pytorch_module_defaults",
+        "initialization": getattr(model, "initialization", "pytorch_module_defaults"),
         "backbone_parameter_count": count_trainable_parameters(backbone),
         "head_parameter_count": count_trainable_parameters(head),
         "parameter_count": count_trainable_parameters(model),
     }
     if cut_input is not None:
         result["cut_point_input_channels"] = int(cut_input)
+    load_report = getattr(model, "pretrained_load_report", None)
+    if load_report is not None:
+        result["pretrained_load_report"] = load_report.as_dict()
     return result
