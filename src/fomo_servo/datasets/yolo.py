@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from math import isfinite
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Mapping, Optional, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
@@ -26,6 +26,9 @@ class DatasetError(ValueError):
 
 class YoloLabelError(ValueError):
     """Raised when a YOLO label line is malformed or outside normalized bounds."""
+
+
+LabelLoader = Callable[[Path, int], Tuple["NormalizedYoloBox", ...]]
 
 
 @dataclass(frozen=True)
@@ -107,6 +110,7 @@ class YOLOv5FOMODataset:
         augmentation: Optional[AugmentationConfig] = None,
         train_split: str = "train",
         augmentation_seed: int = 0,
+        label_loader: Optional[LabelLoader] = None,
     ) -> None:
         self.root = Path(root)
         if class_mode not in self.CLASS_MODES:
@@ -144,6 +148,9 @@ class YOLOv5FOMODataset:
         )
         self.train_split = train_split
         self.augmentation_seed = augmentation_seed
+        if label_loader is not None and not callable(label_loader):
+            raise DatasetError("label_loader must be callable or None")
+        self.label_loader = parse_yolo_label_file if label_loader is None else label_loader
         self.current_epoch = 0
         self.is_train = split == train_split and split.lower() not in {
             "val",
@@ -216,9 +223,7 @@ class YOLOv5FOMODataset:
         label_path = self.labels_dir / "{}.txt".format(image_path.stem)
         original_image = _load_rgb_image(image_path)
         original_height, original_width = original_image.shape[:2]
-        source_boxes = parse_yolo_label_file(
-            label_path, num_source_classes=len(self.source_class_names)
-        )
+        source_boxes = self.label_loader(label_path, len(self.source_class_names))
 
         original_boxes = []
         for source_box in source_boxes:
@@ -333,6 +338,22 @@ def parse_yolo_label_file(
     except OSError as error:
         raise YoloLabelError("unable to read label file '{}': {}".format(path, error)) from error
 
+    return parse_yolo_label_lines(path, lines, num_source_classes)
+
+
+def parse_yolo_label_lines(
+    label_path: Union[str, Path], lines: Sequence[str], num_source_classes: int
+) -> Tuple[NormalizedYoloBox, ...]:
+    """Parse already-read YOLO rows using the same validation as file loading.
+
+    ``label_path`` is used only for diagnostic error context. ``lines`` contain
+    raw text rows without their line terminators. The returned boxes use
+    normalized original-image coordinates.
+    """
+
+    path = Path(label_path)
+    if not isinstance(num_source_classes, int) or num_source_classes <= 0:
+        raise YoloLabelError("num_source_classes must be a positive integer")
     boxes = []
     for line_number, line in enumerate(lines, start=1):
         stripped = line.strip()

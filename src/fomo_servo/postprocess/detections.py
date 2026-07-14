@@ -109,7 +109,69 @@ def postprocess_logits(
     detached = logits.detach().float()
     if not bool(torch.isfinite(detached).all().item()):
         raise PostprocessError("logits contain NaN or Inf")
-    probabilities = torch.softmax(detached, dim=1).cpu().numpy()
+    return postprocess_probabilities(
+        torch.softmax(detached, dim=1),
+        class_names=names,
+        stride=stride,
+        transforms=transforms,
+        confidence_threshold=confidence_threshold,
+        class_thresholds=class_thresholds,
+        component_mode=component_mode,
+        confidence_mode=confidence_mode,
+    )
+
+
+def postprocess_probabilities(
+    probabilities: Tensor,
+    *,
+    class_names: Sequence[str],
+    stride: int,
+    transforms: Sequence[LetterboxTransform],
+    confidence_threshold: float,
+    class_thresholds: Optional[ThresholdSpec] = None,
+    component_mode: str = "connected_components",
+    confidence_mode: str = "max",
+) -> Tuple[Tuple[Detection, ...], ...]:
+    """Convert FOMO probabilities ``[B,1+N,G,G]`` into centroid detections.
+
+    This is the no-extra-softmax entry point for deployable models whose graph
+    already emits softmax probabilities, such as the inspected EI TFLite model.
+    Channel zero is background. Per-cell channel sums must be one within
+    ``1e-4`` and every value must be finite and non-negative.
+    """
+
+    if not isinstance(probabilities, Tensor) or probabilities.ndim != 4:
+        raise PostprocessError("probabilities must have shape [B,1+N,G,G]")
+    if not probabilities.is_floating_point():
+        raise PostprocessError("probabilities must have a floating-point dtype")
+    if not isinstance(stride, int) or isinstance(stride, bool) or stride <= 0:
+        raise PostprocessError("stride must be a positive integer")
+    names = _validate_class_names(class_names)
+    batch_size, channels, grid_height, grid_width = probabilities.shape
+    if channels != len(names) + 1:
+        raise PostprocessError("probability channel count must equal 1 + len(class_names)")
+    if grid_height <= 0 or grid_width <= 0 or grid_height != grid_width:
+        raise PostprocessError("probability heatmap must have positive square shape [G,G]")
+    if len(transforms) != batch_size:
+        raise PostprocessError("one LetterboxTransform is required for every batch image")
+    thresholds = _resolve_thresholds(confidence_threshold, class_thresholds, names)
+    if component_mode == "local_peaks":
+        raise PostprocessError("local_peaks mode is reserved for a future extension")
+    if component_mode != "connected_components":
+        raise PostprocessError(
+            "component_mode must be 'connected_components' or 'local_peaks'"
+        )
+    if confidence_mode not in {"max", "mean"}:
+        raise PostprocessError("confidence_mode must be 'max' or 'mean'")
+
+    detached = probabilities.detach().float()
+    if not bool(torch.isfinite(detached).all().item()):
+        raise PostprocessError("probabilities contain NaN or Inf")
+    if bool((detached < 0.0).any().item()):
+        raise PostprocessError("probabilities must be non-negative")
+    if not bool(torch.allclose(detached.sum(dim=1), torch.ones_like(detached[:, 0]), atol=1e-4, rtol=1e-4)):
+        raise PostprocessError("probabilities must sum to one across classes per heatmap cell")
+    probability_array = detached.cpu().numpy()
     output = []
     for batch_index in range(batch_size):
         transform = transforms[batch_index]
@@ -123,7 +185,7 @@ def postprocess_logits(
             )
         image_detections = []
         for class_id, threshold in enumerate(thresholds):
-            probability_map = probabilities[batch_index, class_id + 1]
+            probability_map = probability_array[batch_index, class_id + 1]
             mask = probability_map >= threshold
             for component in find_connected_components(mask, connectivity=8):
                 weights = np.asarray(

@@ -6,7 +6,11 @@ import pytest
 import torch
 
 from fomo_servo.geometry import LetterboxTransform
-from fomo_servo.postprocess import PostprocessError, postprocess_logits
+from fomo_servo.postprocess import (
+    PostprocessError,
+    postprocess_logits,
+    postprocess_probabilities,
+)
 
 
 def _transform() -> LetterboxTransform:
@@ -72,3 +76,28 @@ def test_postprocess_rejects_unsupported_component_mode() -> None:
             confidence_threshold=0.5,
             component_mode="local_peaks",
         )
+
+
+def test_probability_entrypoint_matches_logits_without_a_second_softmax() -> None:
+    logits = torch.tensor(
+        [[[[2.0, 0.0], [0.0, 0.0]], [[0.0, 3.0], [0.0, 0.0]]]],
+        dtype=torch.float32,
+    )
+    transform = LetterboxTransform.from_image_size(16, 16, 16)
+
+    from_logits = postprocess_logits(
+        logits,
+        class_names=("fish",),
+        stride=8,
+        transforms=(transform,),
+        confidence_threshold=0.5,
+    )
+    from_probabilities = postprocess_probabilities(
+        logits.softmax(dim=1),
+        class_names=("fish",),
+        stride=8,
+        transforms=(transform,),
+        confidence_threshold=0.5,
+    )
+
+    assert from_probabilities == from_logits

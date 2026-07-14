@@ -17,6 +17,7 @@
 - `.[dev]`：pytest 开发测试工具（不包含 torch）。
 - `.[export]`：固定尺寸 ONNX 导出和 ONNX 图校验所需的 `onnx`（不包含 torch 或 ONNX Runtime）。
 - `.[deployment]`：Raspberry Pi 部署运行时。
+- `.[tflite]`：仅用于审计 Edge Impulse 导出的 TFLite/LiteRT 模型；使用官方 LiteRT wheel，不安装完整 TensorFlow。
 - `.[training,export,deployment]`：同机端到端验证所需的项目依赖（不包含 torch）。
 
 ## Windows：创建并激活独立训练环境
@@ -65,6 +66,14 @@ python scripts/check_env.py --profile all
 ```
 
 `onnx` 是 PyTorch ONNX 导出器生成并校验 ONNX 图所需的依赖；`onnxruntime` 只在 CPU 运行时推理与 PyTorch/ONNX 输出一致性测试中需要。两者均不改变已安装的 PyTorch CUDA wheel。
+
+如需运行 Edge Impulse TFLite parity audit，再额外安装轻量解释器：
+
+```powershell
+python -m pip install -e ".[tflite]"
+```
+
+它只用于读取和执行导出的 `.tflite`；不替代 ONNX Runtime 的 Raspberry Pi 部署路径。
 
 ## Raspberry Pi 5：独立部署环境
 

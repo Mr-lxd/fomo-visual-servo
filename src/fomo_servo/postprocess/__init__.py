@@ -6,7 +6,12 @@ from .connected_components import (
     ConnectedComponentsError,
     find_connected_components,
 )
-from .detections import Detection, PostprocessError, postprocess_logits
+from .detections import (
+    Detection,
+    PostprocessError,
+    postprocess_logits,
+    postprocess_probabilities,
+)
 from .selection import select_target
 from .tracking import TargetTracker, TrackingResult
 
@@ -19,5 +24,6 @@ __all__ = [
     "TrackingResult",
     "find_connected_components",
     "postprocess_logits",
+    "postprocess_probabilities",
     "select_target",
 ]
