@@ -206,6 +206,22 @@ def _require_equal(protocol: Mapping[str, object], field: str, actual: object) -
         )
 
 
+def validate_threshold_artifact(tuning: Mapping[str, object]) -> None:
+    """Validate the fixed validation-only selection metadata schema."""
+
+    if tuning.get("split") != "val":
+        raise D2LockedTestError("threshold tuning artifact split is not val")
+    selection = tuning.get("selection")
+    if not isinstance(selection, Mapping):
+        raise D2LockedTestError("threshold tuning artifact is missing selection metadata")
+    if selection.get("selected_epoch") != _EXPECTED_EPOCH:
+        raise D2LockedTestError("threshold artifact selected epoch is not 40")
+    if selection.get("strict_validation_threshold") != _EXPECTED_THRESHOLD:
+        raise D2LockedTestError("threshold artifact selected threshold is not 0.40")
+    if selection.get("metric") != "centroid_pr_auc_macro":
+        raise D2LockedTestError("threshold artifact metric is not centroid_pr_auc_macro")
+
+
 def validate_locked_protocol(
     protocol: Mapping[str, object],
     *,
@@ -307,15 +323,7 @@ def validate_locked_protocol(
     )
     _require_equal(protocol, "threshold_tuning_artifact_sha256", _sha256_file(tuning_artifact))
     tuning = _load_json(tuning_artifact, "threshold tuning artifact")
-    selection = tuning.get("selection")
-    if not isinstance(selection, Mapping):
-        raise D2LockedTestError("threshold tuning artifact is missing selection metadata")
-    if selection.get("selected_epoch") != _EXPECTED_EPOCH:
-        raise D2LockedTestError("threshold artifact selected epoch is not 40")
-    if selection.get("strict_validation_threshold") != _EXPECTED_THRESHOLD:
-        raise D2LockedTestError("threshold artifact selected threshold is not 0.40")
-    if selection.get("metric") != "centroid_pr_auc_macro" or selection.get("split") != "val":
-        raise D2LockedTestError("threshold artifact does not describe the locked validation protocol")
+    validate_threshold_artifact(tuning)
 
     current_commit = git_commit_sha(repository_root)
     _require_equal(protocol, "evaluator_code_commit", current_commit)

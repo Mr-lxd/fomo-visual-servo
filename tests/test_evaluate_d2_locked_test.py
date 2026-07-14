@@ -129,3 +129,18 @@ def test_metric_rows_include_all_fixed_evaluators() -> None:
         "strict_one_to_one",
     ]
     assert rows[0]["true_positives"] == 1
+
+
+def test_threshold_artifact_reads_split_from_artifact_root() -> None:
+    module = _script_module()
+
+    module.validate_threshold_artifact(
+        {
+            "split": "val",
+            "selection": {
+                "selected_epoch": 40,
+                "strict_validation_threshold": 0.4,
+                "metric": "centroid_pr_auc_macro",
+            },
+        }
+    )
