@@ -72,8 +72,10 @@ def _read_checkpoint_class_weight_metadata(checkpoint_path: Path) -> dict[str, o
     ):
         raise InferenceError("checkpoint class_statistics must be a list of mappings")
     mode = checkpoint.get("class_weight_mode")
-    if mode is not None and mode not in {"manual", "auto"}:
-        raise InferenceError("checkpoint class_weight_mode must be 'manual' or 'auto'")
+    if mode is not None and mode not in {"manual", "auto", "disabled"}:
+        raise InferenceError(
+            "checkpoint class_weight_mode must be 'manual', 'auto', or 'disabled'"
+        )
     return {
         "class_weights": weights,
         "class_weight_mode": mode,

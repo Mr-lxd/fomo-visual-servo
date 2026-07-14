@@ -69,6 +69,7 @@ def write_epoch_snapshot(
     seed: int,
     augmentation_preset: Optional[str],
     checkpoint_threshold: float,
+    loss_metadata: Optional[Mapping[str, Any]] = None,
     keep_last: Optional[int] = None,
 ) -> Path:
     """Write one CPU weights-only non-resumable snapshot using atomic publication."""
@@ -94,6 +95,7 @@ def write_epoch_snapshot(
         "seed": _positive_or_zero_integer(seed, "seed"),
         "augmentation_preset": augmentation_preset,
         "checkpoint_threshold": _probability(checkpoint_threshold, "checkpoint_threshold"),
+        "loss": dict(loss_metadata or {}),
     }
     atomic_torch_save(payload, destination)
     if keep_last is not None:

@@ -129,7 +129,10 @@ def collect_split_logits(
             "offline selection split '{}' resolves to the train split; validation/test "
             "selection must not use random augmentation".format(split)
         )
-    if config.loss.class_weights is None:
+    if config.loss.class_weights is None and config.loss.name not in {
+        "weighted_softmax_ce",
+        "ei_weighted_xent_legacy",
+    }:
         raise CheckpointSelectionError(
             "offline validation loss requires resolved class_weights; automatic training "
             "weights must be read from the source checkpoint before evaluation"

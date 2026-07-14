@@ -96,6 +96,7 @@ class LossConfig:
     class_weights: Optional[Tuple[float, ...]] = None
     class_weight_mode: str = "manual"
     background_weight: float = 1.0
+    object_weight: float = 1.0
     foreground_base_weight: float = 25.0
     class_balance: str = "sqrt_inverse_frequency"
     min_foreground_weight: float = 12.5
@@ -439,25 +440,67 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     )
 
     loss_mapping = _optional_mapping(payload, "loss")
+    if "name" in loss_mapping and "type" in loss_mapping:
+        if loss_mapping["name"] != loss_mapping["type"]:
+            raise ConfigurationError("loss.name and loss.type must match when both are provided")
     loss_name = _optional_text(
-        loss_mapping, "name", "focal_cross_entropy", "loss"
-    )
-    if loss_name not in {"weighted_cross_entropy", "focal_cross_entropy"}:
-        raise ConfigurationError(
-            "loss.name must be 'weighted_cross_entropy' or 'focal_cross_entropy'"
-        )
-    loss_gamma = _optional_nonnegative_float(loss_mapping, "gamma", 2.0, "loss")
-    (
-        class_weight_mode,
-        class_weights,
-        background_weight,
-        foreground_base_weight,
-        class_balance,
-        min_foreground_weight,
-        max_foreground_weight,
-    ) = _parse_loss_class_weight_settings(
         loss_mapping,
-        expected_count=1 + len(class_names),
+        "type" if "type" in loss_mapping else "name",
+        "focal_cross_entropy",
+        "loss",
+    )
+    supported_loss_names = {
+        "weighted_cross_entropy",
+        "focal_cross_entropy",
+        "weighted_softmax_ce",
+        "ei_weighted_xent_legacy",
+    }
+    if loss_name not in supported_loss_names:
+        raise ConfigurationError(
+            "loss.type/loss.name must be one of: {}".format(
+                ", ".join(sorted(supported_loss_names))
+            )
+        )
+    is_object_weight_loss = loss_name in {
+        "weighted_softmax_ce",
+        "ei_weighted_xent_legacy",
+    }
+    loss_gamma = _optional_nonnegative_float(
+        loss_mapping, "gamma", 0.0 if is_object_weight_loss else 2.0, "loss"
+    )
+    if is_object_weight_loss:
+        if loss_gamma != 0.0:
+            raise ConfigurationError(
+                "loss.gamma must be 0 for object-weight losses; focal modulation is not supported"
+            )
+        if "class_weights" in loss_mapping and loss_mapping["class_weights"] is not None:
+            raise ConfigurationError(
+                "loss.class_weights must be omitted for object-weight losses; per-class weighting cannot be stacked"
+            )
+        class_weight_mode = "disabled"
+        class_weights = None
+        background_weight = _optional_positive_float(
+            loss_mapping, "background_weight", 1.0, "loss"
+        )
+        foreground_base_weight = 25.0
+        class_balance = "sqrt_inverse_frequency"
+        min_foreground_weight = 12.5
+        max_foreground_weight = 75.0
+    else:
+        (
+            class_weight_mode,
+            class_weights,
+            background_weight,
+            foreground_base_weight,
+            class_balance,
+            min_foreground_weight,
+            max_foreground_weight,
+        ) = _parse_loss_class_weight_settings(
+            loss_mapping,
+            expected_count=1 + len(class_names),
+        )
+    object_weight = _optional_positive_float(
+        loss_mapping, "object_weight", 1.0, "loss"
     )
 
     postprocess_mapping = _optional_mapping(payload, "postprocess")
@@ -776,6 +819,7 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             class_weights=class_weights,
             class_weight_mode=class_weight_mode,
             background_weight=background_weight,
+            object_weight=object_weight,
             foreground_base_weight=foreground_base_weight,
             class_balance=class_balance,
             min_foreground_weight=min_foreground_weight,

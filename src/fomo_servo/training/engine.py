@@ -125,6 +125,11 @@ class TrainingSummary:
     class_weight_mode: str = "manual"
     class_weights: tuple[float, ...] = ()
     class_statistics: tuple[ClassTrainingStatistics, ...] = ()
+    loss_type: str = "focal_cross_entropy"
+    loss_gamma: float = 2.0
+    background_weight: float = 1.0
+    object_weight: float = 1.0
+    per_class_weights_applied: bool = True
     best_epoch: int = 0
     best_grid_epoch: int = 0
     best_centroid_epoch: int = 0
@@ -506,6 +511,11 @@ def run_training(
             resolved_augmentation=resolved_augmentation_dict(config.augmentation),
             augmentation_stats=train_augmentation_stats,
             model_metadata=model_metadata,
+            loss_type=config.loss.name,
+            loss_gamma=config.loss.gamma,
+            background_weight=config.loss.background_weight,
+            object_weight=config.loss.object_weight,
+            per_class_weights_applied=resolved_weights.mode != "disabled",
         )
         torch.save(
             _checkpoint_payload(
@@ -558,6 +568,14 @@ def run_training(
                     seed=config.training.seed,
                     augmentation_preset=config.augmentation.preset,
                     checkpoint_threshold=config.evaluation.checkpoint_threshold,
+                    loss_metadata={
+                        "loss_type": config.loss.name,
+                        "gamma": config.loss.gamma,
+                        "background_weight": config.loss.background_weight,
+                        "object_weight": config.loss.object_weight,
+                        "class_weight_mode": resolved_weights.mode,
+                        "per_class_weights_applied": resolved_weights.mode != "disabled",
+                    },
                     keep_last=config.training.epoch_snapshots.keep_last,
                 )
             except RuntimeError as error:
@@ -592,6 +610,11 @@ def run_training(
         class_weight_mode=resolved_weights.mode,
         class_weights=resolved_weights.weights,
         class_statistics=resolved_weights.statistics,
+        loss_type=config.loss.name,
+        loss_gamma=config.loss.gamma,
+        background_weight=config.loss.background_weight,
+        object_weight=config.loss.object_weight,
+        per_class_weights_applied=resolved_weights.mode != "disabled",
         best_epoch=best_epoch,
         best_grid_epoch=best_grid_epoch,
         best_centroid_epoch=best_centroid_epoch,
@@ -967,6 +990,11 @@ def _record_experiment(
             "best_epoch": summary.best_epoch,
             "best_grid_epoch": summary.best_grid_epoch,
             "best_centroid_epoch": summary.best_centroid_epoch,
+            "loss_type": summary.loss_type,
+            "loss_gamma": summary.loss_gamma,
+            "background_weight": summary.background_weight,
+            "object_weight": summary.object_weight,
+            "per_class_weights_applied": summary.per_class_weights_applied,
             "checkpoint_threshold": config.evaluation.checkpoint_threshold,
             "final_sweep_best_threshold": validation_report.best_threshold,
             "best_val_f1_alias_target": summary.best_val_f1_alias_target,
@@ -1038,6 +1066,11 @@ def _write_training_summary(summary_path: Path, summary: TrainingSummary) -> Non
         "class_weight_mode": summary.class_weight_mode,
         "class_weights": list(summary.class_weights),
         "class_statistics": [item.as_dict() for item in summary.class_statistics],
+        "loss_type": summary.loss_type,
+        "loss_gamma": summary.loss_gamma,
+        "background_weight": summary.background_weight,
+        "object_weight": summary.object_weight,
+        "per_class_weights_applied": summary.per_class_weights_applied,
         "augmentation_preset": summary.augmentation_preset,
         "resolved_augmentation": summary.resolved_augmentation,
         "augmentation_epoch_stats": list(summary.augmentation_epoch_stats),
@@ -1167,6 +1200,11 @@ def _checkpoint_payload(
     resolved_augmentation: Mapping[str, Any],
     augmentation_stats: Mapping[str, Any],
     model_metadata: Mapping[str, Any],
+    loss_type: str,
+    loss_gamma: float,
+    background_weight: float,
+    object_weight: float,
+    per_class_weights_applied: bool,
 ) -> dict[str, Any]:
     """Capture resume state and explicit fixed-threshold selection metadata."""
 
@@ -1195,6 +1233,11 @@ def _checkpoint_payload(
         "class_weight_mode": resolved_weights.mode,
         "class_weights": list(resolved_weights.weights),
         "class_statistics": [item.as_dict() for item in resolved_weights.statistics],
+        "loss_type": loss_type,
+        "loss_gamma": loss_gamma,
+        "background_weight": background_weight,
+        "object_weight": object_weight,
+        "per_class_weights_applied": per_class_weights_applied,
         "rng_state": _capture_rng_state(),
         "augmentation_preset": augmentation_preset,
         "resolved_augmentation": dict(resolved_augmentation),

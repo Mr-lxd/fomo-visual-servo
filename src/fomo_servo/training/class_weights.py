@@ -182,9 +182,19 @@ def resolve_auto_class_weights(
 def resolve_training_class_weights(
     loss_config: "LossConfig", dataset: YOLOv5FOMODataset
 ) -> ResolvedClassWeights:
-    """Collect training evidence and resolve legacy-manual or auto weights."""
+    """Collect evidence and resolve legacy weights without stacking object weights."""
 
     statistics = collect_training_heatmap_statistics(dataset)
+    loss_name = getattr(loss_config, "name", "")
+    if loss_name in {"weighted_softmax_ce", "ei_weighted_xent_legacy"}:
+        # These losses own the background-vs-object weighting.  Unit values are
+        # retained only as explicit metadata for consumers of old checkpoints;
+        # the loss implementation does not read them.
+        return ResolvedClassWeights(
+            "disabled",
+            tuple(1.0 for _ in range(dataset.num_foreground_classes + 1)),
+            statistics,
+        )
     mode = getattr(loss_config, "class_weight_mode", "manual")
     if mode == "manual":
         weights = getattr(loss_config, "class_weights", None)
