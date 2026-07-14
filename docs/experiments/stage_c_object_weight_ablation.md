@@ -117,7 +117,8 @@ baseline 作为比较项。
 
 ## 结果登记
 
-以下表格待正式训练及 validation offline scan 后填写，禁止手填推测值。
+以下结果来自正式训练及 validation-only offline scan；C1–C4 均已完成 60 个
+snapshot，未使用 test 选择 epoch、阈值或 object weight。
 
 | experiment | loss | object weight | selected epoch | validation threshold | strict P/R/F1 | EI legacy P/R/F1 | macro F1 | count MAE |
 |---|---|---:|---:|---:|---|---|---:|---:|
@@ -129,6 +130,74 @@ baseline 作为比较项。
 表中 P/R/F1 是 validation 指标。主选择规则是 validation strict centroid F1：
 C2=0.362791 高于 C4=0.361257、C3=0.359613 和 C1=0.327245，因此唯一选择
 C2；C4 的 EI legacy validation F1 较高不能改变 primary candidate。
+
+## Stage C.1：统一 focal baseline
+
+Stage C.1 固定既有 focal epoch 58 candidate，不重新训练、不更换 checkpoint。
+在原始 validation 127 张上使用 FP32、strict one-to-one EI-compatible evaluator、
+threshold `0.05..0.95` step `0.05`，目标为 strict centroid F1；并列时选择较低
+threshold。选择结果为 threshold `0.35`，validation strict P/R/F1 为
+`0.470699/0.273927/0.346314`。
+
+该 focal snapshot 由 pre-Stage-C 配置 schema 训练。当前配置新增了
+`loss.object_weight`，因此 artifact 同时记录当前 fingerprint 和去除这一唯一
+新增字段后的历史 fingerprint；只有当 checkpoint Git commit 为锁定的
+`82ebf19...` 且历史 fingerprint 精确匹配时才允许评估。此兼容模式不放宽模型、
+数据集或 checkpoint SHA 校验。
+
+| model | threshold source | threshold | strict TP/FP/FN | strict P/R/F1 | EI legacy P/R/F1 | strict macro F1 | count MAE |
+|---|---|---:|---:|---|---|---:|---:|
+| focal epoch58 | fixed parity | 0.50 | 99/31/483 | 0.7615/0.1701/0.2781 | 0.8000/0.1769/0.2897 | 0.1852 | 7.2063 |
+| focal epoch58 | strict validation tuning | 0.35 | 170/134/412 | 0.5592/0.2921/0.3837 | 0.6184/0.3113/0.4141 | 0.3469 | 5.6825 |
+| C2 epoch49 | strict validation tuning | 0.10 | 173/187/409 | 0.4806/0.2973/0.3673 | 0.5333/0.3179/0.3983 | 0.2729 | 5.3016 |
+
+相对 focal@0.50，C2 strict F1 提升 `+0.0892`，EI legacy F1 提升 `+0.1086`；
+相对协议对等的 focal strict-validation-tuned 工作点，C2 strict F1 为
+`-0.0164`，EI legacy F1 为 `-0.0158`。因此 object-weight 结论必须区分旧的
+fixed-parity baseline 与统一 validation-tuned baseline，不能把 C2 的 test 提升
+全部归因于 loss。
+
+独立 tuning artifact：
+`outputs/experiments/stage_c1_focal_epoch58_threshold_tuning/threshold_tuning.json`。
+锁定 threshold 后的 test artifact：
+`outputs/experiments/stage_c1_focal_epoch58_test_threshold_035/parity_report.json`。
+
+## C2 与 C4 validation per-class 分析
+
+以下表格使用 CUDA FP32 重放，与既有 Stage C validation summary 的 aggregate
+结果一致。PR-AUC 沿用既有 scan 的 `pr_curves.per_class`；localization 是
+strict one-to-one 成功匹配的 normalized distance，count bias/MAE 是逐图片按类
+计数误差的均值和绝对值均值。C2、C4 的 effective macro class count 均为 7，
+没有类别因无 GT 被排除。
+
+| exp | class | GT | pred | TP | FP | FN | P | R | F1 | PR-AUC | loc mean | loc median | count bias | count MAE |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| C2 | fish | 459 | 333 | 156 | 177 | 303 | 0.4685 | 0.3399 | 0.3939 | 0.1525 | 0.0561 | 0.0453 | -0.9921 | 2.9134 |
+| C2 | jellyfish | 155 | 122 | 54 | 68 | 101 | 0.4426 | 0.3484 | 0.3899 | 0.2290 | 0.0347 | 0.0311 | -0.2598 | 1.2520 |
+| C2 | penguin | 104 | 31 | 15 | 16 | 89 | 0.4839 | 0.1442 | 0.2222 | 0.0677 | 0.0452 | 0.0360 | -0.5748 | 0.7638 |
+| C2 | puffin | 74 | 36 | 21 | 15 | 53 | 0.5833 | 0.2838 | 0.3818 | 0.0978 | 0.0672 | 0.0513 | -0.2992 | 0.4094 |
+| C2 | shark | 57 | 74 | 27 | 47 | 30 | 0.3649 | 0.4737 | 0.4122 | 0.2402 | 0.0442 | 0.0231 | +0.1339 | 0.4646 |
+| C2 | starfish | 27 | 0 | 0 | 0 | 27 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | -0.2126 | 0.2126 |
+| C2 | stingray | 33 | 0 | 0 | 0 | 33 | 0.0000 | 0.0000 | 0.0000 | 0.0038 | 0.0000 | 0.0000 | -0.2598 | 0.2598 |
+| C4 | fish | 459 | 375 | 155 | 220 | 304 | 0.4133 | 0.3377 | 0.3717 | 0.1538 | 0.0682 | 0.0539 | -0.6614 | 3.2283 |
+| C4 | jellyfish | 155 | 77 | 39 | 38 | 116 | 0.5065 | 0.2516 | 0.3362 | 0.2264 | 0.0338 | 0.0331 | -0.6142 | 1.1654 |
+| C4 | penguin | 104 | 47 | 23 | 24 | 81 | 0.4894 | 0.2212 | 0.3046 | 0.0826 | 0.0639 | 0.0360 | -0.4488 | 0.7638 |
+| C4 | puffin | 74 | 45 | 26 | 19 | 48 | 0.5778 | 0.3514 | 0.4370 | 0.1200 | 0.0674 | 0.0539 | -0.2283 | 0.4331 |
+| C4 | shark | 57 | 54 | 25 | 29 | 32 | 0.4630 | 0.4386 | 0.4505 | 0.2241 | 0.0471 | 0.0305 | -0.0236 | 0.4173 |
+| C4 | starfish | 27 | 9 | 3 | 6 | 24 | 0.3333 | 0.1111 | 0.1667 | 0.0831 | 0.1005 | 0.0830 | -0.1417 | 0.2205 |
+| C4 | stingray | 33 | 12 | 5 | 7 | 28 | 0.4167 | 0.1515 | 0.2222 | 0.1325 | 0.0850 | 0.0742 | -0.1654 | 0.2756 |
+
+C4 的 strict macro F1 为 `0.3270`，高于 C2 的 `0.2572`，增量 `+0.0698`，主要
+来自 stingray `+0.2222`、starfish `+0.1667`、penguin `+0.0824`、puffin
+`+0.0552` 和 shark `+0.0382`；fish `-0.0222`、jellyfish `-0.0537` 则下降。
+其中 starfish 和 stingray 的提升分别只由 3 个和 5 个 TP 支撑（GT 分别为 27
+和 33），因此 macro 增益对少数类样本数敏感，不应解读为稳定的整体提升。C4
+strict micro F1 反而比 C2 低 `0.0015`（`0.3613` vs `0.3628`），说明 C4 的
+macro 优势主要是少数类覆盖，而不是高频类整体改善。
+
+完整机器可读表：
+`outputs/experiments/stage_c1_c2_c4_per_class_analysis_cuda/per_class_validation.json`
+和 `per_class_validation.csv`。
 
 ## Locked test
 
@@ -154,6 +223,11 @@ recall 和更多 prediction：strict F1 +0.0892、EI legacy F1 +0.1086；precisi
 下降是 object weight 提高 foreground 召回的直接代价。test 结果仅用于报告，未用于
 改变 candidate、threshold 或 object weight。
 
+Stage C.1 统一 threshold 后，focal epoch58@0.35 的 strict F1 为 `0.3837`、EI
+legacy F1 为 `0.4141`；因此 C2@0.10 相对该 tuned focal baseline 的 strict F1
+为 `-0.0164`，EI legacy F1 为 `-0.0158`。这组净比较仍只用于解释 C2/C4，
+不改变已经锁定的 C2 candidate。
+
 Edge Impulse Studio 当前截图 float32 test 参考为 P=0.63、R=0.36、F1=0.46。
 C2 的 EI legacy test 为 P=0.5333、R=0.3179、F1=0.3983，差距分别为
 `-0.0967`、`-0.0421`、`-0.0617`。这说明 object-weight ablation 缩小了召回侧
@@ -165,4 +239,12 @@ C2 的 EI legacy test 为 P=0.5333、R=0.3179、F1=0.3983，差距分别为
 正式训练输出位于 `outputs/experiments/stage_c_loss_*`，每组有 60 个
 `epoch_snapshots`。validation-only 汇总位于各组的
 `validation_scan/stage_c_validation_summary.json`；locked test 仅位于 C2 的
-`locked_test_threshold_010/parity_report.json`。这些 outputs 被排除在 Git 提交之外。
+`locked_test_threshold_010/parity_report.json`。Stage C.1 的 tuning、focal tuned
+test 和 C2/C4 per-class analysis 分别位于：
+
+- `outputs/experiments/stage_c1_focal_epoch58_threshold_tuning/threshold_tuning.json`
+- `outputs/experiments/stage_c1_focal_epoch58_test_threshold_035/parity_report.json`
+- `outputs/experiments/stage_c1_c2_c4_per_class_analysis_cuda/per_class_validation.json`
+- `outputs/experiments/stage_c1_c2_c4_per_class_analysis_cuda/per_class_validation.csv`
+
+这些 outputs 被排除在 Git 提交之外。
