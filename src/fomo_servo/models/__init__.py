@@ -20,6 +20,13 @@ from .mobilenet_v2_fomo import (
     MobileNetV2FOMOBackbone,
     MobileNetV2FOMONet,
 )
+from .alternative_fomo import (
+    MOBILENET_V3_SMALL_CUT_POINT,
+    SQUEEZENET1_1_CUT_POINT,
+    MobileNetV3SmallFOMONet,
+    SqueezeNet1_1FOMONet,
+    TorchvisionFeatureBackbone,
+)
 
 __all__ = [
     "OUTPUT_STRIDE",
@@ -36,4 +43,9 @@ __all__ = [
     "MobileNetV2BlockSpec",
     "MobileNetV2FOMOBackbone",
     "MobileNetV2FOMONet",
+    "MOBILENET_V3_SMALL_CUT_POINT",
+    "SQUEEZENET1_1_CUT_POINT",
+    "MobileNetV3SmallFOMONet",
+    "SqueezeNet1_1FOMONet",
+    "TorchvisionFeatureBackbone",
 ]

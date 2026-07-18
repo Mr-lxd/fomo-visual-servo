@@ -264,8 +264,41 @@ def build_fomo_model(config: ProjectConfig) -> nn.Module:
             pretrained_source=config.model.pretrained_source,
             pretrained_sha256=config.model.pretrained_sha256,
         )
+    if config.model.backbone == "mobilenet_v3_small_fomo":
+        from .alternative_fomo import MobileNetV3SmallFOMONet
+
+        return MobileNetV3SmallFOMONet(
+            num_classes=len(config.dataset.class_names),
+            input_size=config.model.input_size,
+            head_channels=config.model.head_channels,
+            output_stride=config.model.output_stride,
+            cut_point=config.model.cut_point,
+            pretrained=config.model.pretrained,
+            pretrained_source=config.model.pretrained_source,
+            pretrained_sha256=config.model.pretrained_sha256,
+            pretrained_torchvision_version=config.model.pretrained_torchvision_version,
+            pretrained_weights_enum=config.model.pretrained_weights_enum,
+            pretrained_url=config.model.pretrained_url,
+        )
+    if config.model.backbone == "squeezenet1_1_fomo":
+        from .alternative_fomo import SqueezeNet1_1FOMONet
+
+        return SqueezeNet1_1FOMONet(
+            num_classes=len(config.dataset.class_names),
+            input_size=config.model.input_size,
+            head_channels=config.model.head_channels,
+            output_stride=config.model.output_stride,
+            cut_point=config.model.cut_point,
+            pretrained=config.model.pretrained,
+            pretrained_source=config.model.pretrained_source,
+            pretrained_sha256=config.model.pretrained_sha256,
+            pretrained_torchvision_version=config.model.pretrained_torchvision_version,
+            pretrained_weights_enum=config.model.pretrained_weights_enum,
+            pretrained_url=config.model.pretrained_url,
+        )
     raise ModelConfigurationError(
-        "model.backbone must be 'mobilenet_v2_lite' or 'mobilenet_v2_fomo'"
+        "model.backbone must be 'mobilenet_v2_lite', 'mobilenet_v2_fomo', "
+        "'mobilenet_v3_small_fomo', or 'squeezenet1_1_fomo'"
     )
 
 

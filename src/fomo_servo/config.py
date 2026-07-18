@@ -49,6 +49,10 @@ class ModelConfig:
     pretrained: bool = False
     pretrained_source: Optional[Path] = None
     pretrained_sha256: Optional[str] = None
+    pretrained_format: Optional[str] = None
+    pretrained_torchvision_version: Optional[str] = None
+    pretrained_weights_enum: Optional[str] = None
+    pretrained_url: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -410,11 +414,13 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     head_channels = _optional_positive_integer(
         model_mapping, "head_channels", 32, "model"
     )
-    default_cut_point = (
-        "block_6_expand_relu"
-        if backbone == "mobilenet_v2_fomo"
-        else "lite_stride8_output"
-    )
+    default_cut_points = {
+        "mobilenet_v2_lite": "lite_stride8_output",
+        "mobilenet_v2_fomo": "block_6_expand_relu",
+        "mobilenet_v3_small_fomo": "features.2",
+        "squeezenet1_1_fomo": "features.6.fire4",
+    }
+    default_cut_point = default_cut_points.get(backbone, "lite_stride8_output")
     cut_point = _optional_text(
         model_mapping, "cut_point", default_cut_point, "model"
     )
@@ -427,6 +433,18 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     pretrained_sha256 = _optional_nullable_text(
         model_mapping, "pretrained_sha256", None, "model"
     )
+    pretrained_format = _optional_nullable_text(
+        model_mapping, "pretrained_format", None, "model"
+    )
+    pretrained_torchvision_version = _optional_nullable_text(
+        model_mapping, "pretrained_torchvision_version", None, "model"
+    )
+    pretrained_weights_enum = _optional_nullable_text(
+        model_mapping, "pretrained_weights_enum", None, "model"
+    )
+    pretrained_url = _optional_nullable_text(
+        model_mapping, "pretrained_url", None, "model"
+    )
     if pretrained_sha256 is not None:
         if not re.fullmatch(r"[0-9a-fA-F]{64}", pretrained_sha256):
             raise ConfigurationError(
@@ -435,16 +453,14 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     expected_cut_points = {
         "mobilenet_v2_lite": "lite_stride8_output",
         "mobilenet_v2_fomo": "block_6_expand_relu",
+        "mobilenet_v3_small_fomo": "features.2",
+        "squeezenet1_1_fomo": "features.6.fire4",
     }
     expected_cut_point = expected_cut_points.get(backbone)
     if expected_cut_point is not None and cut_point != expected_cut_point:
         raise ConfigurationError(
             f"model.cut_point must be '{expected_cut_point}' for "
             f"model.backbone='{backbone}'"
-        )
-    if pretrained and backbone != "mobilenet_v2_fomo":
-        raise ConfigurationError(
-            "model.pretrained is supported only for model.backbone='mobilenet_v2_fomo'"
         )
     if pretrained and pretrained_source is None:
         raise ConfigurationError(
@@ -457,6 +473,41 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     if not pretrained and (pretrained_source is not None or pretrained_sha256 is not None):
         raise ConfigurationError(
             "model.pretrained_source and model.pretrained_sha256 require model.pretrained=true"
+        )
+    torchvision_backbones = {"mobilenet_v3_small_fomo", "squeezenet1_1_fomo"}
+    torchvision_values = {
+        "pretrained_format": pretrained_format,
+        "pretrained_torchvision_version": pretrained_torchvision_version,
+        "pretrained_weights_enum": pretrained_weights_enum,
+        "pretrained_url": pretrained_url,
+    }
+    if pretrained and backbone in torchvision_backbones:
+        if pretrained_format != "torchvision_state_dict":
+            raise ConfigurationError(
+                "model.pretrained_format must be 'torchvision_state_dict' for torchvision backbones"
+            )
+        missing_provenance = sorted(
+            name for name, value in torchvision_values.items() if value is None
+        )
+        if missing_provenance:
+            raise ConfigurationError(
+                "model pretrained torchvision provenance is missing: {}".format(
+                    missing_provenance
+                )
+            )
+    elif pretrained and backbone != "mobilenet_v2_fomo":
+        raise ConfigurationError(
+            "model.pretrained is supported only for MobileNetV2 FOMO or Stage E torchvision backbones"
+        )
+    if not pretrained and any(value is not None for value in torchvision_values.values()):
+        raise ConfigurationError(
+            "model pretrained torchvision provenance requires model.pretrained=true"
+        )
+    if pretrained and backbone == "mobilenet_v2_fomo" and any(
+        value is not None for value in torchvision_values.values()
+    ):
+        raise ConfigurationError(
+            "model pretrained torchvision provenance is not valid for mobilenet_v2_fomo"
         )
 
     augmentation = _parse_augmentation_config(
@@ -838,6 +889,10 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             pretrained=pretrained,
             pretrained_source=pretrained_source,
             pretrained_sha256=pretrained_sha256.lower() if pretrained_sha256 else None,
+            pretrained_format=pretrained_format,
+            pretrained_torchvision_version=pretrained_torchvision_version,
+            pretrained_weights_enum=pretrained_weights_enum,
+            pretrained_url=pretrained_url,
         ),
         loss=LossConfig(
             name=loss_name,

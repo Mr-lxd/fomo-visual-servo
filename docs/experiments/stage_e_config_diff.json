@@ -1,0 +1,7 @@
+{
+  "protocol": "stage_e_engineering_candidate_comparison_v1",
+  "baseline": "stage_d2_fomo_ei_w100_pretrained.yaml",
+  "fixed_protocol_fields": ["dataset", "postprocess", "evaluation", "augmentation", "loss", "training", "export"],
+  "variable_fields": ["project.name", "experiment.name", "training.output_dir", "model.backbone", "model.pretrained_*"],
+  "caveat": "D2 uses EI/Keras MobileNetV2 H5; Stage E candidates use official torchvision ImageNet state dicts."
+}

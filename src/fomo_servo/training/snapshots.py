@@ -301,7 +301,21 @@ def _sanitize_config(value: Any, path: tuple[str, ...] = ()) -> Any:
     if isinstance(value, Path):
         return value.as_posix() if not value.is_absolute() else "<absolute-path>"
     if isinstance(value, Mapping):
-        return {str(key): _sanitize_config(item, path + (str(key),)) for key, item in value.items()}
+        optional_stage_e_model_fields = {
+            "pretrained_format",
+            "pretrained_torchvision_version",
+            "pretrained_weights_enum",
+            "pretrained_url",
+        }
+        return {
+            str(key): _sanitize_config(item, path + (str(key),))
+            for key, item in value.items()
+            if not (
+                path == ("model",)
+                and key in optional_stage_e_model_fields
+                and item is None
+            )
+        }
     if isinstance(value, (tuple, list)):
         return [_sanitize_config(item, path) for item in value]
     return value

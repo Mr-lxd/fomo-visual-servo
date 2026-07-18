@@ -37,4 +37,14 @@ def describe_model(config: ProjectConfig, model: nn.Module) -> dict[str, Any]:
     load_report = getattr(model, "pretrained_load_report", None)
     if load_report is not None:
         result["pretrained_load_report"] = load_report.as_dict()
+    pretrained_format = getattr(config.model, "pretrained_format", None)
+    if pretrained_format is not None:
+        result["pretrained_format"] = pretrained_format
+        result["pretrained_torchvision_version"] = (
+            getattr(config.model, "pretrained_torchvision_version", None)
+        )
+        result["pretrained_weights_enum"] = getattr(
+            config.model, "pretrained_weights_enum", None
+        )
+        result["pretrained_url"] = getattr(config.model, "pretrained_url", None)
     return result
