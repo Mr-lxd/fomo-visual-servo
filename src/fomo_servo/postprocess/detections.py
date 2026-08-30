@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import isfinite
+from types import ModuleType
 from typing import Any, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
-import torch
-from torch import Tensor
 
 from fomo_servo.geometry import LetterboxTransform
 
@@ -17,6 +16,24 @@ from .connected_components import find_connected_components
 
 class PostprocessError(ValueError):
     """Raised when logits, thresholds, geometry, or postprocess settings are invalid."""
+
+
+def _require_torch() -> ModuleType:
+    """Import torch lazily for the torch-tensor-only entry points.
+
+    NumPy and ORT-only deployments import this module without ever probing for
+    torch; only callers of :func:`postprocess_logits` and
+    :func:`postprocess_probabilities` pay for the torch import.
+    """
+
+    try:
+        import torch
+    except ModuleNotFoundError as error:
+        raise PostprocessError(
+            "PyTorch is required for torch-tensor postprocessing; "
+            "use the NumPy entry points on ORT-only deployments"
+        ) from error
+    return torch
 
 
 ThresholdMapping = Mapping[Union[int, str], float]
@@ -63,7 +80,7 @@ class Detection:
 
 
 def postprocess_logits(
-    logits: Tensor,
+    logits: Any,
     *,
     class_names: Sequence[str],
     stride: int,
@@ -80,38 +97,57 @@ def postprocess_logits(
     grid centers ``(grid_x+0.5, grid_y+0.5)``.
     """
 
-    if not isinstance(logits, Tensor) or logits.ndim != 4:
+    torch = _require_torch()
+    if not isinstance(logits, torch.Tensor) or logits.ndim != 4:
         raise PostprocessError("logits must have shape [B,1+N,G,G]")
     if not logits.is_floating_point():
         raise PostprocessError("logits must have a floating-point dtype")
-    if not isinstance(stride, int) or isinstance(stride, bool) or stride <= 0:
-        raise PostprocessError("stride must be a positive integer")
-    names = _validate_class_names(class_names)
-    batch_size, channels, grid_height, grid_width = logits.shape
-    if channels != len(names) + 1:
-        raise PostprocessError("logits channel count must equal 1 + len(class_names)")
-    if grid_height <= 0 or grid_width <= 0 or grid_height != grid_width:
-        raise PostprocessError("logits heatmap must have positive square shape [G,G]")
-    if len(transforms) != batch_size:
-        raise PostprocessError("one LetterboxTransform is required for every batch image")
-    thresholds = _resolve_thresholds(
-        confidence_threshold, class_thresholds, names
-    )
-    if component_mode == "local_peaks":
-        raise PostprocessError("local_peaks mode is reserved for a future extension")
-    if component_mode != "connected_components":
-        raise PostprocessError(
-            "component_mode must be 'connected_components' or 'local_peaks'"
-        )
-    if confidence_mode not in {"max", "mean"}:
-        raise PostprocessError("confidence_mode must be 'max' or 'mean'")
-
     detached = logits.detach().float()
     if not bool(torch.isfinite(detached).all().item()):
         raise PostprocessError("logits contain NaN or Inf")
-    return postprocess_probabilities(
-        torch.softmax(detached, dim=1),
-        class_names=names,
+    probabilities = torch.softmax(detached, dim=1)
+    return postprocess_numpy_probabilities(
+        probabilities.cpu().numpy(),
+        class_names=class_names,
+        stride=stride,
+        transforms=transforms,
+        confidence_threshold=confidence_threshold,
+        class_thresholds=class_thresholds,
+        component_mode=component_mode,
+        confidence_mode=confidence_mode,
+    )
+
+
+def postprocess_numpy_logits(
+    logits: np.ndarray,
+    *,
+    class_names: Sequence[str],
+    stride: int,
+    transforms: Sequence[LetterboxTransform],
+    confidence_threshold: float,
+    class_thresholds: Optional[ThresholdSpec] = None,
+    component_mode: str = "connected_components",
+    confidence_mode: str = "max",
+) -> Tuple[Tuple[Detection, ...], ...]:
+    """Convert NumPy raw logits ``[B,1+N,G,G]`` into centroid detections.
+
+    Values are evaluated as float32. A numerically stable channel softmax is
+    applied before the shared NumPy probability/connected-component pipeline.
+    """
+
+    if not isinstance(logits, np.ndarray) or logits.ndim != 4:
+        raise PostprocessError("logits must have shape [B,1+N,G,G]")
+    if not np.issubdtype(logits.dtype, np.floating):
+        raise PostprocessError("logits must have a floating-point dtype")
+    values = logits.astype(np.float32, copy=False)
+    if not bool(np.isfinite(values).all()):
+        raise PostprocessError("logits contain NaN or Inf")
+    shifted = values - values.max(axis=1, keepdims=True)
+    exponentials = np.exp(shifted)
+    probabilities = exponentials / exponentials.sum(axis=1, keepdims=True)
+    return postprocess_numpy_probabilities(
+        probabilities,
+        class_names=class_names,
         stride=stride,
         transforms=transforms,
         confidence_threshold=confidence_threshold,
@@ -122,7 +158,7 @@ def postprocess_logits(
 
 
 def postprocess_probabilities(
-    probabilities: Tensor,
+    probabilities: Any,
     *,
     class_names: Sequence[str],
     stride: int,
@@ -140,9 +176,42 @@ def postprocess_probabilities(
     ``1e-4`` and every value must be finite and non-negative.
     """
 
-    if not isinstance(probabilities, Tensor) or probabilities.ndim != 4:
+    torch = _require_torch()
+    if not isinstance(probabilities, torch.Tensor) or probabilities.ndim != 4:
         raise PostprocessError("probabilities must have shape [B,1+N,G,G]")
     if not probabilities.is_floating_point():
+        raise PostprocessError("probabilities must have a floating-point dtype")
+    detached = probabilities.detach().float()
+    if not bool(torch.isfinite(detached).all().item()):
+        raise PostprocessError("probabilities contain NaN or Inf")
+    return postprocess_numpy_probabilities(
+        detached.cpu().numpy(),
+        class_names=class_names,
+        stride=stride,
+        transforms=transforms,
+        confidence_threshold=confidence_threshold,
+        class_thresholds=class_thresholds,
+        component_mode=component_mode,
+        confidence_mode=confidence_mode,
+    )
+
+
+def postprocess_numpy_probabilities(
+    probabilities: np.ndarray,
+    *,
+    class_names: Sequence[str],
+    stride: int,
+    transforms: Sequence[LetterboxTransform],
+    confidence_threshold: float,
+    class_thresholds: Optional[ThresholdSpec] = None,
+    component_mode: str = "connected_components",
+    confidence_mode: str = "max",
+) -> Tuple[Tuple[Detection, ...], ...]:
+    """Convert NumPy probabilities ``[B,1+N,G,G]`` into centroid detections."""
+
+    if not isinstance(probabilities, np.ndarray) or probabilities.ndim != 4:
+        raise PostprocessError("probabilities must have shape [B,1+N,G,G]")
+    if not np.issubdtype(probabilities.dtype, np.floating):
         raise PostprocessError("probabilities must have a floating-point dtype")
     if not isinstance(stride, int) or isinstance(stride, bool) or stride <= 0:
         raise PostprocessError("stride must be a positive integer")
@@ -164,14 +233,20 @@ def postprocess_probabilities(
     if confidence_mode not in {"max", "mean"}:
         raise PostprocessError("confidence_mode must be 'max' or 'mean'")
 
-    detached = probabilities.detach().float()
-    if not bool(torch.isfinite(detached).all().item()):
+    probability_array = probabilities.astype(np.float32, copy=False)
+    if not bool(np.isfinite(probability_array).all()):
         raise PostprocessError("probabilities contain NaN or Inf")
-    if bool((detached < 0.0).any().item()):
+    if bool((probability_array < 0.0).any()):
         raise PostprocessError("probabilities must be non-negative")
-    if not bool(torch.allclose(detached.sum(dim=1), torch.ones_like(detached[:, 0]), atol=1e-4, rtol=1e-4)):
+    if not bool(
+        np.allclose(
+            probability_array.sum(axis=1),
+            np.ones_like(probability_array[:, 0]),
+            atol=1e-4,
+            rtol=1e-4,
+        )
+    ):
         raise PostprocessError("probabilities must sum to one across classes per heatmap cell")
-    probability_array = detached.cpu().numpy()
     output = []
     for batch_index in range(batch_size):
         transform = transforms[batch_index]

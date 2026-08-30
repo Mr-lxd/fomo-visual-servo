@@ -66,6 +66,9 @@ class LatestFrameReader:
         self.capture = capture
         self.buffer = LatestFrameBuffer()
         self._stop = threading.Event()
+        self.finished = threading.Event()
+        self.error: Optional[Exception] = None
+        self.decoded_frame_count = 0
         self._thread = threading.Thread(target=self._run, name="fomo-latest-frame-reader", daemon=True)
 
     def start(self) -> "LatestFrameReader":
@@ -87,10 +90,22 @@ class LatestFrameReader:
             while not self._stop.is_set():
                 success, frame = self.capture.read()
                 if not success:
+                    expected_frames = int(
+                        self.capture.get(cv2.CAP_PROP_FRAME_COUNT)
+                    )
+                    if expected_frames > 0 and frame_index < expected_frames:
+                        self.error = RuntimeError(
+                            "video decode stopped after {} frames; expected {}".format(
+                                frame_index, expected_frames
+                            )
+                        )
                     break
                 timestamp_ms = float(self.capture.get(cv2.CAP_PROP_POS_MSEC))
                 timestamp = timestamp_ms / 1000.0 if timestamp_ms > 0 else time.time()
                 self.buffer.put_latest(FramePacket(frame_index, timestamp, frame))
                 frame_index += 1
+                self.decoded_frame_count = frame_index
+        except Exception as error:
+            self.error = error
         finally:
-            self.buffer.close()
+            self.finished.set()

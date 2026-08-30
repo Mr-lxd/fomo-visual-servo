@@ -45,6 +45,8 @@ dist/
 /datasets/
 /predictions/
 /benchmarks/
+/smoke_media/
+/camera_runs/
 
 # Notebook and OS files
 .ipynb_checkpoints/

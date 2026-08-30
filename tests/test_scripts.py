@@ -18,7 +18,12 @@ FUTURE_COMMANDS = (
     "benchmark.py",
 )
 
-IMPLEMENTED_COMMANDS = {"evaluate.py", "predict_image.py", "predict_video.py"}
+IMPLEMENTED_COMMANDS = {
+    "evaluate.py",
+    "predict_image.py",
+    "predict_video.py",
+    "export_onnx.py",
+}
 
 
 @pytest.mark.parametrize("script_name", FUTURE_COMMANDS)

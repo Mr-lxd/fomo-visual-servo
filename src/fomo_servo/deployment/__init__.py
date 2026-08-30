@@ -7,7 +7,6 @@ from .tflite_runtime import (
     output_looks_like_probabilities,
     prepare_tflite_input,
 )
-
 __all__ = [
     "TFLiteRuntimeError",
     "create_tflite_interpreter",
