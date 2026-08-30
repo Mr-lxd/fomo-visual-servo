@@ -293,3 +293,65 @@ run_id="$(date +%Y%m%d-%H%M%S)"
 - 长时间 daemon stability test。
 
 后续工作不得重新训练或利用 test split 重选模型/epoch/threshold，不得改变正式 ONNX、sidecar、preprocessing/postprocessing 或 threshold `0.40`，除非开启经过单独批准的新模型 milestone。
+
+## 9. 稳定 baseline 后续系统与数据路线图
+
+### 9.1 稳定分支与论文实验边界
+
+完成 integration PR 后，`main` 表示已经通过验证、能够工作的系统能力，而不是所有科研尝试的集合，也不表示项目或论文工作已经结束：
+
+- `feature/*` 用于准备进入稳定机器人系统的工程功能；功能通过验证后再按正常 review 流程进入 `main`。
+- `experiment/*` 用于 baseline 改进、新模块、attention、loss、backbone、comparison model、ablation 和 domain adaptation。
+- 失败或未采用的实验不要求进入 `main`，但对应 branch、config、结果与 provenance 应保留，供论文实验和科研追溯。
+- Stage E alternative-backbone 历史继续保留在 `feature/fomo-backbone-ablation-v1`，不因未进入当前稳定 baseline 而删除或重写。
+- 真实水域数据集、evaluation protocol 和机器人系统都冻结以后，再考虑在对应稳定节点创建 `paper-baseline-v1`，作为论文 baseline/proposed/ablation/comparison 的统一起点；本阶段不创建该 tag。
+
+### 9.2 下一阶段：机器人软件到硬件闭环
+
+正式 `baseline-d2-v1` 建立后，从该 baseline 对应的最新 `main` 创建 `feature/robot-control-integration`，目标链路为：
+
+```text
+camera
+-> FOMO inference
+-> detections
+-> target selection
+-> visual-servo/control algorithm
+-> actuator command
+-> communication
+-> hardware
+-> robot motion
+```
+
+这一阶段首先追求整个软件到硬件闭环能够可靠运行，不立即优化论文最终模型性能。本次 Git baseline 收口只建立分支起点，不实现 robot-control、systemd 或新的模型训练。
+
+### 9.3 Stage A：实验室水池 adaptation
+
+实验室水池数据的目的不是形成最终论文真实水域模型，而是得到足够可靠的实验室模型，用于机器人硬件控制和完整闭环验证。实际开始采集数据时，建议从稳定 baseline 创建 `experiment/lab-pool-adaptation-v1`；在数据采集前不预先创建该 branch。
+
+实验室数据与模型至少记录：
+
+- dataset version；
+- source/session；
+- train/validation split；
+- dataset manifest/hash；
+- training config；
+- source commit；
+- checkpoint SHA；
+- selected epoch；
+- threshold。
+
+原始图片、视频、checkpoint 和训练 outputs 不进入 Git。Git 只保存 dataset manifest、split definition、config、scripts、metrics/report 和 provenance。如果实验室模型只用于硬件验证，不得将其描述为最终论文模型或正式 field-performance 结果。
+
+只有实验室摄像头、detection、target selection、control、hardware 和 robot motion 的完整闭环稳定通过，并且相应成果进入稳定 `main` 后，才建议在该稳定 commit 上创建 `robot-lab-e2e-v1`；本阶段不创建该 tag。
+
+### 9.4 Stage B：真实水域 adaptation
+
+实验室完整闭环通过后，再采集真正目标水域的数据，并建议从届时冻结的稳定起点创建 `experiment/real-water-adaptation-v1`。真实水域数据用于正式 domain adaptation/retraining、最终模型选择、真实环境测试、完整现场闭环、论文实验和最终公开数据集。
+
+真实水域数据集必须采用比实验室硬件验证数据更严格的数据版本管理、split 冻结和 provenance。真实环境完整闭环通过、成果进入稳定 `main` 后，才建议在对应稳定 commit 上创建 `robot-field-e2e-v1`；本阶段不创建该 tag。
+
+### 9.5 数据集长期规则
+
+当前和未来都不将完整实验室或真实水域数据集直接提交到本代码仓库。`datasets/`、`data/`、原始视频、checkpoints 和 outputs 保持 ignored；Git 只保存复现所需的 manifest、metadata、split 和 config。
+
+论文接受并决定开源时，应为公开数据集选择独立发布位置，并在代码仓库记录 dataset release version、download location、file manifest、SHA/hash、split、license 和 citation。公开数据发布与当前稳定代码 baseline 的 Git 历史保持清晰关联，但不把大体积数据嵌入代码仓库。
