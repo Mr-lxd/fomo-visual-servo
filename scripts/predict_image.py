@@ -10,17 +10,27 @@ from typing import Optional, Sequence
 
 import cv2
 
-from fomo_servo.config import ConfigurationError, load_config
-from fomo_servo.inference import InferenceError, load_inference_model, predict_rgb_image, read_rgb_image
-from fomo_servo.models import ModelConfigurationError
+from fomo_servo.inference import (
+    InferenceError,
+    OnnxRuntimePredictor,
+    OrtPredictorError,
+    OutputPathError,
+    PreprocessingError,
+    load_inference_model,
+    predict_rgb_image,
+    read_rgb_image,
+    validate_output_paths,
+)
 from fomo_servo.postprocess import PostprocessError, select_target
-from fomo_servo.runtime import RuntimeDeviceError
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Predict FOMO centroids for one image.")
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--config", type=Path)
+    model_group = parser.add_mutually_exclusive_group(required=True)
+    model_group.add_argument("--checkpoint", type=Path)
+    model_group.add_argument("--onnx", type=Path)
+    parser.add_argument("--onnx-report", type=Path)
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--device", default=None)
     parser.add_argument("--confidence-threshold", type=float, default=None)
@@ -35,27 +45,98 @@ def build_parser() -> argparse.ArgumentParser:
 def main(arguments: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(arguments)
     try:
-        config = load_config(args.config)
-        request = config.training.device if args.device is None else args.device
-        model, device = load_inference_model(config, args.checkpoint, request)
-        prediction = predict_rgb_image(
-            model,
-            read_rgb_image(args.image),
-            config=config,
-            device=device,
-            confidence_threshold=args.confidence_threshold,
+        protected_inputs = {"image": args.image}
+        for name in ("config", "checkpoint", "onnx", "onnx_report"):
+            value = getattr(args, name)
+            if value is not None:
+                protected_inputs[name] = value
+        validate_output_paths(
+            protected_inputs=protected_inputs,
+            outputs={
+                "output_image": args.output_image,
+                "output_json": args.output_json,
+            },
         )
-        selected = select_target(
-            prediction.detections,
-            args.strategy or config.postprocess.selection_strategy,
-            max_match_distance=(
+        if args.onnx is not None:
+            if args.onnx_report is None:
+                raise InferenceError("--onnx-report is required with --onnx")
+            if args.config is not None or args.device is not None:
+                raise InferenceError("--config and --device apply only to --checkpoint")
+            ort_predictor = OnnxRuntimePredictor.from_files(
+                args.onnx, args.onnx_report
+            )
+            prediction = ort_predictor.predict_rgb_image(
+                read_rgb_image(args.image),
+                confidence_threshold=args.confidence_threshold,
+            )
+            strategy = args.strategy or ort_predictor.contract.selection_strategy
+            max_match_distance = (
+                args.max_match_distance
+                if args.max_match_distance is not None
+                else ort_predictor.contract.max_match_distance_pixels
+            )
+            allowed_class_ids = (
+                tuple(args.class_ids)
+                if args.class_ids is not None
+                else ort_predictor.contract.allowed_class_ids
+            )
+            runtime_name = "onnxruntime"
+            model_sha256 = ort_predictor.contract.onnx_sha256
+        else:
+            if args.config is None:
+                raise InferenceError("--config is required with --checkpoint")
+            if args.onnx_report is not None:
+                raise InferenceError("--onnx-report applies only to --onnx")
+            try:
+                from fomo_servo.config import ConfigurationError, load_config
+                from fomo_servo.models import ModelConfigurationError
+                from fomo_servo.runtime import RuntimeDeviceError
+
+                config = load_config(args.config)
+                request = (
+                    config.training.device if args.device is None else args.device
+                )
+                model, device = load_inference_model(
+                    config, args.checkpoint, request
+                )
+            except (
+                ConfigurationError,
+                ModelConfigurationError,
+                RuntimeDeviceError,
+            ) as error:
+                raise InferenceError(
+                    "unable to initialize PyTorch backend: {}".format(error)
+                ) from error
+            prediction = predict_rgb_image(
+                model,
+                read_rgb_image(args.image),
+                config=config,
+                device=device,
+                confidence_threshold=args.confidence_threshold,
+            )
+            strategy = args.strategy or config.postprocess.selection_strategy
+            max_match_distance = (
                 args.max_match_distance
                 if args.max_match_distance is not None
                 else config.postprocess.max_match_distance_pixels
-            ),
-            allowed_class_ids=args.class_ids or config.postprocess.allowed_class_ids,
+            )
+            allowed_class_ids = args.class_ids or config.postprocess.allowed_class_ids
+            runtime_name = "pytorch"
+            model_sha256 = None
+        selected = select_target(
+            prediction.detections,
+            strategy,
+            max_match_distance=max_match_distance,
+            allowed_class_ids=allowed_class_ids,
         )
-    except (ConfigurationError, ModelConfigurationError, RuntimeDeviceError, InferenceError, PostprocessError, ValueError) as error:
+    except (
+        InferenceError,
+        OrtPredictorError,
+        OutputPathError,
+        PreprocessingError,
+        PostprocessError,
+        ValueError,
+    ) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
 
@@ -83,6 +164,8 @@ def main(arguments: Optional[Sequence[str]] = None) -> int:
             cv2.LINE_AA,
         )
     payload = {
+        "runtime": runtime_name,
+        "model_sha256": model_sha256,
         "image": str(args.image),
         "image_width": width,
         "image_height": height,

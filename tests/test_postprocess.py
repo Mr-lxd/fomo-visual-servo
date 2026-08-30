@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from math import exp
 
+import numpy as np
 import pytest
 import torch
 
@@ -9,6 +10,7 @@ from fomo_servo.geometry import LetterboxTransform
 from fomo_servo.postprocess import (
     PostprocessError,
     postprocess_logits,
+    postprocess_numpy_logits,
     postprocess_probabilities,
 )
 
@@ -101,3 +103,89 @@ def test_probability_entrypoint_matches_logits_without_a_second_softmax() -> Non
     )
 
     assert from_probabilities == from_logits
+
+
+def test_torch_logits_entrypoint_preserves_torch_softmax(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fomo_servo.postprocess.detections as detections_module
+
+    def reject_numpy_logits(*args, **kwargs):
+        raise AssertionError("torch entrypoint must not delegate softmax to NumPy")
+
+    monkeypatch.setattr(
+        detections_module, "postprocess_numpy_logits", reject_numpy_logits
+    )
+    result = postprocess_logits(
+        torch.tensor([[[[0.0]], [[2.0]]]], dtype=torch.float32),
+        class_names=("creature",),
+        stride=8,
+        transforms=(LetterboxTransform.from_image_size(8, 8, 8),),
+        confidence_threshold=0.4,
+    )
+
+    assert len(result[0]) == 1
+
+
+def test_numpy_logits_match_torch_detection_pipeline() -> None:
+    logits = torch.tensor(
+        [
+            [
+                [[-2.0, -2.0], [-2.0, -2.0]],
+                [[4.0, 3.0], [-1.0, -1.0]],
+                [[-1.0, -1.0], [5.0, -1.0]],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    transform = LetterboxTransform.from_image_size(16, 12, 16)
+    keyword_arguments = {
+        "class_names": ("fish", "crab"),
+        "stride": 8,
+        "transforms": (transform,),
+        "confidence_threshold": 0.4,
+        "component_mode": "connected_components",
+        "confidence_mode": "max",
+    }
+
+    torch_detections = postprocess_logits(logits, **keyword_arguments)[0]
+    numpy_detections = postprocess_numpy_logits(
+        logits.numpy(), **keyword_arguments
+    )[0]
+
+    assert [item.class_id for item in numpy_detections] == [
+        item.class_id for item in torch_detections
+    ]
+    assert [item.class_name for item in numpy_detections] == [
+        item.class_name for item in torch_detections
+    ]
+    for numpy_detection, torch_detection in zip(
+        numpy_detections, torch_detections
+    ):
+        for field in (
+            "confidence",
+            "mean_confidence",
+            "heatmap_x",
+            "heatmap_y",
+            "input_x",
+            "input_y",
+            "original_x",
+            "original_y",
+        ):
+            assert getattr(numpy_detection, field) == pytest.approx(
+                getattr(torch_detection, field), abs=1e-6
+            )
+
+
+def test_numpy_logits_reject_nonfinite_values() -> None:
+    logits = np.zeros((1, 2, 2, 2), dtype=np.float32)
+    logits[0, 1, 0, 0] = np.nan
+
+    with pytest.raises(PostprocessError, match="NaN or Inf"):
+        postprocess_numpy_logits(
+            logits,
+            class_names=("creature",),
+            stride=8,
+            transforms=(LetterboxTransform.from_image_size(16, 16, 16),),
+            confidence_threshold=0.4,
+        )

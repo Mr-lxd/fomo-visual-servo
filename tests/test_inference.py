@@ -3,11 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 from torch import nn
 
 from fomo_servo.config import load_config
-from fomo_servo.inference import predict_rgb_image
+from fomo_servo.inference import InferenceError, PreprocessingError, predict_rgb_image
 from fomo_servo.postprocess import Detection
 from scripts.predict_video import CSV_COLUMNS
 
@@ -84,6 +85,38 @@ postprocess:
 
     assert default_prediction.detections == ()
     assert len(explicit_prediction.detections) == 1
+
+
+def test_predict_rgb_image_exposes_inference_error_for_invalid_image(tmp_path: Path) -> None:
+    """Regression: the PyTorch predictor keeps its historical public exception.
+
+    Shared preprocessing raises ``PreprocessingError`` internally, but callers of
+    ``predict_rgb_image`` must continue to see ``InferenceError`` with the
+    ``PreprocessingError`` preserved as the cause.
+    """
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+dataset:
+  root: data
+  classes: [creature]
+model:
+  input_size: 96
+  output_stride: 8
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    wrong_shape = np.zeros((48, 96), dtype=np.uint8)
+    wrong_dtype = np.zeros((48, 96, 3), dtype=np.float32)
+
+    for image in (wrong_shape, wrong_dtype):
+        with pytest.raises(InferenceError) as excinfo:
+            predict_rgb_image(
+                _FixedLogitModel(), image, config=config, device=torch.device("cpu")
+            )
+        assert isinstance(excinfo.value.__cause__, PreprocessingError)
 
 
 def test_detection_and_video_csv_schemas_are_stable() -> None:

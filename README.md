@@ -1,14 +1,14 @@
 # fomo-visual-servo
 
-面向水下目标视觉伺服的轻量化 PyTorch FOMO 项目。训练与开发目标是 Windows，最终部署目标是 Raspberry Pi 5 上的 ONNX Runtime CPU。
+面向水下目标视觉伺服的轻量化 PyTorch FOMO 项目。训练与导出在 Windows 上进行；正式 D2 MobileNetV2-FOMO 已在 Raspberry Pi 4 ARM64 / Python 3.13 上完成 ONNX Runtime CPU、静态图片、预录视频、USB UVC 摄像头和 VNC 实时预览验证。
 
-当前仓库已包含 YAML 配置加载、YOLOv5 数据读取与 stride-8 heatmap 标签生成、MobileNetV2-lite FOMO 模型、CPU/CUDA 训练验证、图片/视频推理和固定尺寸 ONNX 导出接口。ONNX 与 ONNX Runtime 属于可选依赖，Raspberry Pi 5 的实际延迟和功耗仍未实测。
+当前仓库包含 YAML 配置加载、YOLOv5 数据读取与 stride-8 heatmap 标签生成、MobileNetV2-lite FOMO 模型、CPU/CUDA 训练验证、固定尺寸 ONNX 导出、ONNX Runtime predictor，以及图片、视频和摄像头 CLI。正式 checkpoint、ONNX、数据集和部署运行产物由 `.gitignore` 排除，不随源码发布。
 
 ## 环境边界
 
 - **训练环境**：Python 3.10、PyTorch、OpenCV 与开发测试工具。训练代码必须支持 CPU；CUDA wheel 不写入 `environment.yml` 或 `pyproject.toml`，而是由激活后的项目环境通过明确的官方 pip 命令安装一次。
 - **导出环境**：`onnx` 仅用于 Windows 训练机将 PyTorch 模型序列化为 ONNX；Raspberry Pi 运行时不需要它。
-- **部署环境**：Python 3.10、ONNX Runtime 与 OpenCV。它不要求安装 PyTorch，面向 Raspberry Pi 5 的 CPU 推理。
+- **部署环境**：Raspberry Pi 4 使用 Python 3.13、ONNX Runtime 与 OpenCV 的最小 bundle，不安装完整训练项目或 PyTorch。headless 与 GUI preview 使用互斥的 OpenCV profile。
 - **组合环境**：只有需要在同一台机器同时验证 PyTorch、ONNX 导出和 ONNX Runtime 时，才安装相关 optional dependency groups。
 
 `pyproject.toml` 中的依赖组为：
@@ -75,19 +75,67 @@ python -m pip install -e ".[tflite]"
 
 它只用于读取和执行导出的 `.tflite`；不替代 ONNX Runtime 的 Raspberry Pi 部署路径。
 
-## Raspberry Pi 5：独立部署环境
+## Raspberry Pi 4：已验证的最小部署环境
 
-在 Raspberry Pi 的项目副本中使用 Python 3.10 创建虚拟环境；不要把 Windows 的训练环境复制到 Pi：
+Pi 端不安装受 `pyproject.toml` Python 3.10 边界约束的完整训练包，而是使用只包含 ORT inference 闭包的 bundle。当前实装版本为：
 
-```bash
-python3.10 -m venv .venv-fomo-servo-deploy
-source .venv-fomo-servo-deploy/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[deployment]"
-python scripts/check_env.py --profile deployment
+```text
+Python 3.13.5
+numpy==2.5.2
+onnxruntime==1.29.0
+opencv-python-headless==5.0.0.93  # headless profile
+opencv-python==5.0.0.93           # preview profile，独立 venv
 ```
 
-部署 profile 会检查 Python、OpenCV、ONNX Runtime 和当前设备；即使 PyTorch 未安装，也不会因此将部署 profile 判为失败。
+仓库根目录的 `requirements-pi4-headless.txt` 与 `requirements-pi4-preview.txt` 分别描述两个互斥 profile。正式 headless venv 不依赖桌面 GUI；preview venv 提供 Qt HighGUI，并且必须从 VNC 桌面中的 Terminal 自然继承 Wayland/XWayland 会话变量。源码和启动命令不写死 `DISPLAY`。
+
+以下是当前 Pi 上已经实测的 bundle 与 venv 路径；`run.py` 本身从所在目录解析 bundle root，因此 bundle 可整体移动。
+
+### Headless deployment
+
+适用于 benchmark、无人值守运行以及后续 systemd 集成。`--display` 默认关闭：
+
+```bash
+cd /home/pi/fomo-ort-d2-epoch40
+run_id="$(date +%Y%m%d-%H%M%S)"
+/home/pi/venvs/fomo-ort-d2-epoch40/bin/python run.py predict_video \
+  --onnx artifacts/d2_mobilenet_v2_fomo_seed42_epoch40.onnx \
+  --onnx-report artifacts/d2_mobilenet_v2_fomo_seed42_epoch40.onnx.json \
+  --source 0 \
+  --max-frames 300 \
+  --output-video "camera_runs/${run_id}/camera-overlay.mp4" \
+  --output-csv "camera_runs/${run_id}/camera-telemetry.csv" \
+  --output-jsonl "camera_runs/${run_id}/camera-telemetry.jsonl"
+```
+
+### VNC preview / calibration
+
+适用于调整摄像头角度、距离和视野，以及人工查看 annotated detections。必须在 VNC 桌面的 Terminal 中运行；不要从普通 SSH shell 手工设置 `DISPLAY`：
+
+```bash
+cd /home/pi/fomo-ort-d2-epoch40
+run_id="$(date +%Y%m%d-%H%M%S)"
+/home/pi/venvs/fomo-ort-d2-epoch40-preview/bin/python run.py predict_video \
+  --onnx artifacts/d2_mobilenet_v2_fomo_seed42_epoch40.onnx \
+  --onnx-report artifacts/d2_mobilenet_v2_fomo_seed42_epoch40.onnx.json \
+  --source 0 \
+  --display \
+  --output-video "camera_runs/${run_id}/camera-overlay.mp4" \
+  --output-csv "camera_runs/${run_id}/camera-telemetry.csv" \
+  --output-jsonl "camera_runs/${run_id}/camera-telemetry.jsonl"
+```
+
+参数含义：
+
+- `--onnx`：正式固定尺寸模型。
+- `--onnx-report`：sidecar/provenance contract；启动时校验模型 SHA、size、shape、opset 和正式 threshold。
+- `--source`：视频路径或摄像头索引；`0` 对应已验证的 `/dev/video0`。
+- `--display`：默认关闭的桌面/VNC annotated-frame preview；按 `q`、`Q` 或 Esc 正常停止。
+- `--output-video`：保存带 overlay 的录像。
+- `--output-csv`：保存便于表格分析的逐帧 telemetry。
+- `--output-jsonl`：保存完整机器可读的逐帧结果。
+
+上述正式命令不传 `--confidence-threshold`，因此使用 sidecar 锁定的 `0.40`。摄像头拍摄显示器时出现的 false positive 属于明显 domain shift，只能用于 pipeline/资源释放回归，不能作为模型精度评价。完整 provenance、跨平台 parity 和 Pi benchmark 见 [Raspberry Pi 4 deployment handoff](docs/handoffs/2026-08-28-raspberry-pi4-deployment-handoff.md)。
 
 ## 环境检查
 

@@ -2,39 +2,33 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any
 
 import cv2
 import numpy as np
-import torch
 
 from fomo_servo.config import ProjectConfig
-from fomo_servo.geometry import LetterboxTransform, letterbox_rgb
-from fomo_servo.models import FOMONet, build_fomo_model
-from fomo_servo.postprocess import Detection, postprocess_logits
-from fomo_servo.runtime import DeviceRequest, resolve_device
+
+from .preprocessing import (
+    ImagePrediction,
+    PreprocessingError,
+    preprocess_rgb_image,
+)
 
 
 class InferenceError(RuntimeError):
     """Raised when checkpoint, image, device, or inference contracts are invalid."""
 
 
-@dataclass(frozen=True)
-class ImagePrediction:
-    """One image's letterbox metadata and postprocessed detections."""
-
-    original_image: np.ndarray
-    letterbox_image: np.ndarray
-    transform: LetterboxTransform
-    detections: tuple[Detection, ...]
-
-
 def load_inference_model(
-    config: ProjectConfig, checkpoint: Path, device_request: DeviceRequest
-) -> tuple[FOMONet, torch.device]:
+    config: ProjectConfig, checkpoint: Path, device_request: Any
+) -> tuple[Any, Any]:
     """Load an existing FOMO checkpoint without changing model architecture or weights."""
+
+    import torch
+    from fomo_servo.models import build_fomo_model
+    from fomo_servo.runtime import resolve_device
 
     device = resolve_device(device_request)
     checkpoint_path = Path(checkpoint)
@@ -60,20 +54,23 @@ def load_inference_model(
 
 
 def predict_rgb_image(
-    model: FOMONet,
+    model: Any,
     image: np.ndarray,
     *,
     config: ProjectConfig,
-    device: torch.device,
+    device: Any,
     confidence_threshold: float | None = None,
 ) -> ImagePrediction:
     """Letterbox RGB ``uint8 [H,W,3]`` and return detections in original pixels."""
 
-    if not isinstance(image, np.ndarray) or image.ndim != 3 or image.shape[2] != 3:
-        raise InferenceError("image must have RGB shape [H,W,3]")
-    letterbox_image, transform = letterbox_rgb(image, config.model.input_size)
-    normalized = np.ascontiguousarray(letterbox_image.transpose(2, 0, 1), dtype=np.float32) / 255.0
-    tensor = torch.from_numpy(normalized).unsqueeze(0).to(device)
+    import torch
+    from fomo_servo.postprocess import postprocess_logits
+
+    try:
+        prepared = preprocess_rgb_image(image, input_size=config.model.input_size)
+    except PreprocessingError as error:
+        raise InferenceError("invalid input image: {}".format(error)) from error
+    tensor = torch.from_numpy(prepared.input_tensor).to(device)
     with torch.no_grad():
         logits = model(tensor)
     threshold = (
@@ -85,13 +82,18 @@ def predict_rgb_image(
         logits,
         class_names=config.dataset.class_names,
         stride=config.model.output_stride,
-        transforms=(transform,),
+        transforms=(prepared.transform,),
         confidence_threshold=threshold,
         class_thresholds=config.postprocess.class_thresholds,
         component_mode=config.postprocess.component_mode,
         confidence_mode=config.postprocess.confidence_mode,
     )[0]
-    return ImagePrediction(image, letterbox_image, transform, detections)
+    return ImagePrediction(
+        prepared.original_image,
+        prepared.letterbox_image,
+        prepared.transform,
+        detections,
+    )
 
 
 def read_rgb_image(path: Path) -> np.ndarray:

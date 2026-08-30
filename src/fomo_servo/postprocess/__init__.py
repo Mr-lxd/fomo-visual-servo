@@ -10,6 +10,8 @@ from .detections import (
     Detection,
     PostprocessError,
     postprocess_logits,
+    postprocess_numpy_logits,
+    postprocess_numpy_probabilities,
     postprocess_probabilities,
 )
 from .selection import select_target
@@ -24,6 +26,8 @@ __all__ = [
     "TrackingResult",
     "find_connected_components",
     "postprocess_logits",
+    "postprocess_numpy_logits",
+    "postprocess_numpy_probabilities",
     "postprocess_probabilities",
     "select_target",
 ]
