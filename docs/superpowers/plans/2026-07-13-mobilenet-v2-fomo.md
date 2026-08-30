@@ -379,7 +379,7 @@ skips if dependencies are absent.
 conda run --no-capture-output -n fomo-servo-train `
   python -m compileall src scripts
 
-git -c safe.directory=D:/DL_Project/fomo-visual-servo diff --check
+git diff --check
 ```
 
 Expected: both commands succeed.
@@ -472,8 +472,7 @@ After approval, verify the branch and scope, rerun pytest/compileall/diff check,
 stage only model/config/test/docs changes, and commit:
 
 ```powershell
-git -c safe.directory=D:/DL_Project/fomo-visual-servo `
-  commit -m "feat: add MobileNetV2 FOMO backbone"
+git commit -m "feat: add MobileNetV2 FOMO backbone"
 ```
 
 - [ ] **Step 2: Enforce the formal-training gate**

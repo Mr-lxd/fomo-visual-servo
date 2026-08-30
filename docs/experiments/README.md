@@ -23,6 +23,7 @@
 | D2 validation | pretrained initialization 的固定 seed42 candidate 表现如何 | seed42 选 epoch40、threshold0.40，validation Strict F1 0.422235 | [D2 multiseed report](stage_d2_multiseed_validation_report.md) | [D2 config](../../configs/experiments/stage_d2_fomo_ei_w100_pretrained.yaml) | seed42 locked test 已单独完成 | `04927069`、`7b2b9566` |
 | D2 locked test | seed42 candidate 在 parity-clean test 上的 locked 指标是什么 | Strict F1 0.451977；EI legacy F1 0.484959；test 不参与选择 | [D2 locked report](stage_d2_locked_test_report.md) | [D2 locked evaluator](../../scripts/evaluate_d2_locked_test.py) | 是，仅 seed42 一次 | `505f970b`、`0cbb064f`、`bf3e3c76`、`6849f9c9` |
 | D2 multi-seed validation | seed42 结论是否依赖单个随机 seed | 固定 42/123/2027；Strict F1 `0.418215 ± 0.005413`；123/2027 不运行 test | [multi-seed report](stage_d2_multiseed_validation_report.md)、[design](stage_d2_multiseed_validation_design.md) | [seed123](../../configs/experiments/stage_d2_multiseed_seed123.yaml)、[seed2027](../../configs/experiments/stage_d2_multiseed_seed2027.yaml) | 否，validation-only | `c39dd6bb`、`38d6330f` |
+| D2 ONNX / Pi 4 deployment | 锁定的 D2 candidate 能否形成可移植 ORT/camera runtime | opset 17 ONNX、Windows/Pi parity、USB UVC 与 VNC preview 已验证 | [Pi 4 deployment handoff](../handoffs/2026-08-28-raspberry-pi4-deployment-handoff.md) | [export config](../../configs/export/d2_seed42_epoch40_onnx.yaml)、[bundle launcher](../../run.py) | 不用于模型选择或性能重评 | `7cc1d19d` |
 
 ## 当前正式候选
 
@@ -31,10 +32,17 @@
 - candidate：D2 seed42 / epoch40 / validation threshold `0.40`。
 - 主指标：D2 seed42 locked-test strict one-to-one F1 `0.451977`。
 - 稳定性：D2 multi-seed validation strict F1 `0.418215 ± 0.005413`。
+- 正式 ONNX：opset `17`，固定 `[1,3,192,192] -> [1,8,24,24]` raw logits，SHA-256 `3dea74511bf2c44844192e75594fd53d4c4ce941f8b53b15767e020832bf9b08`。
+- 部署状态：Raspberry Pi 4 ARM64 / Python 3.13 上的 ORT CPU、静态图片、预录视频、real-data smoke test、USB camera 与 VNC preview 已验证；该结果不代表机器人控制闭环或最终论文方法已经完成。
 
-## 待完成事项
+## 稳定主线与科研分支边界
 
-1. 用户批准后，才可将当前 feature branch 推送到 origin 并创建 Draft PR。
-2. 需要补充 ONNX/ONNX Runtime optional dependencies 后，执行导出和数值一致性测试。
-3. Raspberry Pi 5 batch=1 CPU 延迟、内存、功耗和长期运行稳定性尚未实测。
-4. pretrained H5 的 license/redistribution status 仍需从来源方确认；不加入仓库或 Release。
+`feature/fomo-main-integration-v1` 只集成当前已验证的 D2 baseline 与 Raspberry Pi 4 deployment milestone。Stage E MobileNetV3/SqueezeNet 对比属于有效但未进入正式系统的科研探索，其 `13b1802`、`4f0aadf` 历史继续保留在 `feature/fomo-backbone-ablation-v1`；“不进入稳定 main”不等于删除实验或 provenance。
+
+## 后续事项
+
+1. 从稳定 main 开展 camera → perception → target selection → visual servo/control → actuator/hardware 的机器人闭环。
+2. 新的 baseline 创新、模型对比和消融优先使用 `experiment/*` 分支，并保持训练/validation/test 边界。
+3. 完成实验室环境与真实环境验证、投稿版本冻结，以及最终代码与数据集开源方案。
+4. Raspberry Pi 5 batch=1 CPU 延迟、内存、功耗和长期运行稳定性尚未实测。
+5. pretrained H5 的 license/redistribution status 仍需从来源方确认；不加入仓库或 Release。

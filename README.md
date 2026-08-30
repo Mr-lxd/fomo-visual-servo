@@ -4,6 +4,19 @@
 
 当前仓库包含 YAML 配置加载、YOLOv5 数据读取与 stride-8 heatmap 标签生成、MobileNetV2-lite FOMO 模型、CPU/CUDA 训练验证、固定尺寸 ONNX 导出、ONNX Runtime predictor，以及图片、视频和摄像头 CLI。正式 checkpoint、ONNX、数据集和部署运行产物由 `.gitignore` 排除，不随源码发布。
 
+## 当前稳定基线与后续范围
+
+当前 integration 定义为“已验证的 D2 baseline + Raspberry Pi 4 / ONNX Runtime / USB camera / VNC preview 稳定工程基线”，用于长期回退和后续开发；它不是最终论文代码或项目终点。
+
+- **Training / research**：保留 D2 MobileNetV2-FOMO 的 augmentation、checkpoint selection、validation/locked evaluation、threshold protocol、model card 和实验 provenance。未经单独实验计划，不在稳定主线上混入对比模型或消融依赖。
+- **Headless Pi deployment**：正式无人值守路径使用最小 ORT bundle 和 `opencv-python-headless`，不安装 PyTorch、torchvision、训练代码、数据集或 checkpoint。
+- **VNC preview / debug**：独立 preview 环境仅用于实时查看 annotated frame、调整摄像头和验证资源释放，不改变推理语义，也不把桌面刷新率当作模型 FPS。
+- **Future robot-control integration**：摄像头到 perception 的链路已经打通；target selection、visual servo/control、actuator/hardware 闭环，以及后续方法创新、对比/消融、实验室与真实环境测试、投稿冻结和最终开源仍属于未来阶段。
+
+未进入该稳定基线的科研探索继续保留在 `experiment/*` 或专用 feature branch 中。“不进入 main”不等于删除实验历史。
+
+合并该 baseline 后，机器人闭环建议从最新 `main` 创建 `feature/robot-control-integration`；新的模型对比、方法创新和消融原则上使用 `experiment/*`，不直接在稳定 `main` 上试验。
+
 ## 环境边界
 
 - **训练环境**：Python 3.10、PyTorch、OpenCV 与开发测试工具。训练代码必须支持 CPU；CUDA wheel 不写入 `environment.yml` 或 `pyproject.toml`，而是由激活后的项目环境通过明确的官方 pip 命令安装一次。

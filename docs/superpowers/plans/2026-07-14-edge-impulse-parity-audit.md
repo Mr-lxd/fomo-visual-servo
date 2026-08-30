@@ -195,10 +195,10 @@ Run: `python -m pytest -q`
 
 Run: `python -m compileall -q src scripts`
 
-Run: `git -c safe.directory=D:/DL_Project/fomo-visual-servo diff --check`
+Run from the repository root: `git diff --check`
 
-Run: `git -c safe.directory=D:/DL_Project/fomo-visual-servo status --short`
+Run from the repository root: `git status --short`
 
-Run: `git -c safe.directory=D:/DL_Project/fomo-visual-servo diff --stat`
+Run from the repository root: `git diff --stat`
 
 No commit, push, retraining, loss change, class-weight change, object-weight change, threshold sweep, or checkpoint replacement is allowed.

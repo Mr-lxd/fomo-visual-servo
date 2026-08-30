@@ -25,8 +25,8 @@ The design file fixes RNG, preset, operation order, geometry, no-op and metadata
 Run:
 
 ```powershell
-git -c safe.directory=D:/DL_Project/fomo-visual-servo branch --show-current
-git -c safe.directory=D:/DL_Project/fomo-visual-servo status --porcelain
+git branch --show-current
+git status --porcelain
 ```
 
 Expected branch: `feature/fomo-augmentation-suite`; expected status: empty.
@@ -207,7 +207,7 @@ Use the existing fixture and assert all four required files are created, JSON ha
 ```powershell
 conda run --no-capture-output -n fomo-servo-train python -m pytest -q
 conda run --no-capture-output -n fomo-servo-train python -m compileall src scripts
-git -c safe.directory=D:/DL_Project/fomo-visual-servo diff --check
+git diff --check
 ```
 
 - [ ] **Step 2: Run a synthetic smoke check.**

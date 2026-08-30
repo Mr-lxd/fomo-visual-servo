@@ -59,5 +59,5 @@
 
 - [ ] Run `conda run --no-capture-output -n fomo-servo-train python -m pytest -q` without formal CUDA training.
 - [ ] Run `conda run --no-capture-output -n fomo-servo-train python -m compileall src scripts`.
-- [ ] Run `git -c safe.directory=D:/DL_Project/fomo-visual-servo diff --check`.
+- [ ] Run `git diff --check` from the repository root.
 - [ ] Report modified files, mathematical semantics, RNG source, test results, contact-sheet paths, config drift, and unresolved issues; do not commit or push.

@@ -19,14 +19,16 @@
 
 以下边界在整个阶段保持不变：没有重新训练，没有访问 test split 重新选择模型、epoch 或 threshold，正式 threshold 始终为 `0.40`，正式 checkpoint/ONNX contract 没有修改。checkpoint、ONNX、数据集、smoke media、camera outputs、cache 和 Pi venv 不进入 Git。
 
-## 2. Git 收口基线
+## 2. Git 收口与稳定 main integration
 
-最终收口开始时重新读取的真实状态：
+Raspberry Pi milestone 原始提交来自 `feature/fomo-backbone-ablation-v1` 的 `32169d6054861dece2b37cb149e75eb2ab160492`。稳定 main integration 在重新读取远端 graph 后按以下边界建立：
 
-- branch：`feature/fomo-backbone-ablation-v1`
-- baseline HEAD：`4f0aadf939573dfcbc97aa3e3ac3efad76fa17a4`
-- workspace：普通 repository checkout，非 linked worktree、非 detached HEAD。
-- branch 在收口前尚无 upstream；最终只允许正常 push 当前 feature branch，不 merge `main`、不 force-push。
+- integration branch：`feature/fomo-main-integration-v1`
+- 起点：`a8f2e38dcf95000c3b5970bb0cc6cddd618cc6a3`，包含 Stage E 之前完整的 D2 training/evaluation/provenance 历史。
+- deployment cherry-pick：`7cc1d19d465941780a08a4c68cfdd08c99b811f4`，由原始 `32169d6` 无冲突生成。
+- Stage E commits `13b18029682e62915f288f9c8c1f1517ee14635f` 与 `4f0aadf939573dfcbc97aa3e3ac3efad76fa17a4` 不进入稳定 integration，但完整保留在原 `feature/fomo-backbone-ablation-v1` 历史中。
+- integration 使用 linked worktree 隔离完成；原 Stage E checkout、远程 branch 和用户未跟踪文件均未修改或删除。
+- integration branch 只允许正常 push 到同名 origin；本 handoff 不表示 `main` 已合并、tag 已创建或原 branch 已重写。
 - 工作树包含本 milestone 的 ONNX exporter、ORT predictor、共享推理语义、Finding 1–4、smoke selector、camera/VNC CLI、launcher、requirements、测试和文档。
 - `docs/handoffs/2026-07-18-github-draft-pr-continuation-handoff.md` 是 milestone 前已有的用户文件，保持未修改且不纳入本次 commit。
 
@@ -37,7 +39,7 @@
 - `/data/`、`/datasets/`
 - `/smoke_media/`、`/camera_runs/`
 
-提交前必须再次以 staged diff 为准复核文件、敏感信息和禁止扩展名；本节的 baseline HEAD 不能代替下一会话的实时 Git 检查。
+提交和 PR 前必须再次以 staged/branch diff 为准复核文件、敏感信息和禁止扩展名；本节记录不能代替下一会话的实时 Git 检查。
 
 ## 3. 正式模型合同与 provenance
 
@@ -114,8 +116,8 @@ outputs/deployment/d2_seed42_epoch40/d2_mobilenet_v2_fomo_seed42_epoch40.onnx.js
 
 最终收口的新鲜验证结果：
 
-- 相关定向 pytest：`110 passed in 23.23s`。
-- 全量 pytest：`383 passed, 34 warnings in 97.35s`。
+- 稳定 integration 定向 pytest（checkpoint/config、ONNX/ORT、imports、parity/postprocess、image/video/camera、bundle、smoke selector、display）：`195 passed, 13 warnings in 59.38s`。
+- 排除 Stage E 后的稳定 integration 全量 pytest：`373 passed, 34 warnings`。
 - `git diff --check`：退出码 0；只有 Windows LF/CRLF 提示。
 - 正式 `onnx.checker`：passed，opset 17，I/O shape 保持 `[1,3,192,192] -> [1,8,24,24]`。
 - checkpoint/ONNX/sidecar SHA 与本 handoff 记录完全一致。

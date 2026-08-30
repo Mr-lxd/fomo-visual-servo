@@ -69,5 +69,5 @@
 
 - [ ] Run `conda run --no-capture-output -n fomo-servo-train python -m pytest -q`.
 - [ ] Run `conda run --no-capture-output -n fomo-servo-train python -m compileall src scripts`.
-- [ ] Run `git -c safe.directory=D:/DL_Project/fomo-visual-servo diff --check` and inspect `git diff --stat`.
+- [ ] Run `git diff --check` from the repository root and inspect `git diff --stat`.
 - [ ] Run the six-checkpoint regression audit, estimate a 60-epoch scan from observed per-checkpoint evaluator time, and report results without training, committing, or pushing.

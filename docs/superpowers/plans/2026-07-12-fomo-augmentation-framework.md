@@ -176,7 +176,7 @@ Run: `conda run --no-capture-output -n fomo-servo-train python -m compileall src
 
 - [ ] **Step 3: Run diff whitespace validation**
 
-Run: `git -c safe.directory=D:/DL_Project/fomo-visual-servo diff --check`
+Run from the repository root: `git diff --check`
 
 - [ ] **Step 4: Confirm no aug01_color implementation or formal CUDA training was executed**
 

@@ -1,6 +1,6 @@
 # Stage D2 configuration diff
 
-Base: `configs/experiments/stage_d1_fomo_ei_w100.yaml`  
+Base: `configs/experiments/stage_d1_fomo_ei_w100.yaml`
 Candidate: `configs/experiments/stage_d2_fomo_ei_w100_pretrained.yaml`
 
 The candidate is a single-variable initialization experiment. Dataset,
