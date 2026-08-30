@@ -1,0 +1,2 @@
+# Provenance contracts hash exact YAML bytes; keep checkout bytes stable across OSes.
+*.yaml text eol=lf

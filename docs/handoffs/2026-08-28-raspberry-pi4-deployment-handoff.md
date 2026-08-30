@@ -116,8 +116,8 @@ outputs/deployment/d2_seed42_epoch40/d2_mobilenet_v2_fomo_seed42_epoch40.onnx.js
 
 最终收口的新鲜验证结果：
 
-- 稳定 integration 定向 pytest（checkpoint/config、ONNX/ORT、imports、parity/postprocess、image/video/camera、bundle、smoke selector、display）：`195 passed, 13 warnings in 59.38s`。
-- 排除 Stage E 后的稳定 integration 全量 pytest：`373 passed, 34 warnings`。
+- 稳定 integration 定向 pytest（checkpoint/config、ONNX/ORT、imports、parity/postprocess、image/video/camera、bundle、smoke selector、display）：`197 passed, 13 warnings in 55.29s`。
+- 排除 Stage E 并加入 provenance YAML 行尾回归后的稳定 integration 全量 pytest：`375 passed, 34 warnings`。
 - `git diff --check`：退出码 0；只有 Windows LF/CRLF 提示。
 - 正式 `onnx.checker`：passed，opset 17，I/O shape 保持 `[1,3,192,192] -> [1,8,24,24]`。
 - checkpoint/ONNX/sidecar SHA 与本 handoff 记录完全一致。

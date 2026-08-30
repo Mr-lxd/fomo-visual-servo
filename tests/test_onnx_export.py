@@ -16,8 +16,33 @@ import yaml
 from fomo_servo.models import MobileNetV2FOMONet
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "expected_sha256"),
+    (
+        (
+            "configs/experiments/stage_d2_fomo_ei_w100_pretrained.yaml",
+            "f6e35683a6df8f98537c4ca870487858a9e089f4d76d965176d51f08fe88fb2e",
+        ),
+        (
+            "configs/export/d2_seed42_epoch40_onnx.yaml",
+            "a05219c21ddaa8e24ee262ffc7d9d30d104268dc1bd3d8cff970a41cc81becf7",
+        ),
+    ),
+)
+def test_formal_provenance_yaml_bytes_match_locked_sha256(
+    relative_path: str, expected_sha256: str
+) -> None:
+    payload = (ROOT / relative_path).read_bytes()
+
+    assert b"\r\n" not in payload
+    assert hashlib.sha256(payload).hexdigest() == expected_sha256
 
 
 def _checkpoint_metadata() -> dict[str, object]:
