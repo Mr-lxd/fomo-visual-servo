@@ -124,7 +124,79 @@ training:
     assert config.training.num_workers == 4
     assert config.training.pin_memory is True
     assert hasattr(config.training, "epochs"), "training.epochs must be available"
+    assert config.training.checkpoint_criterion == "grid_f1"
     assert hasattr(config, "loss"), "loss configuration must be available"
+    assert config.postprocess.component_mode == "connected_components"
+    assert config.evaluation.matching_mode == "centroid_in_bbox"
+    assert config.loss.class_weight_mode == "manual"
+    assert config.loss.class_weights == (1.0, 1.0)
+
+
+def test_load_config_reads_inert_checkpoint_selection_v2_defaults(tmp_path: Path) -> None:
+    """Existing YAML must receive disabled snapshots and deterministic v2 defaults."""
+
+    _, load_config = _config_api()
+    assert callable(load_config)
+    config_path = tmp_path / "v2_defaults.yaml"
+    config_path.write_text(
+        """
+dataset:
+  root: data/aquarium_creature
+  classes: [creature]
+model:
+  input_size: 96
+  output_stride: 8
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.training.epoch_snapshots.enabled is False
+    assert config.training.epoch_snapshots.format == "weights_only"
+    assert config.training.epoch_snapshots.interval == 1
+    assert config.training.epoch_snapshots.keep_last is None
+    assert config.evaluation.checkpoint_selection.metric == "centroid_pr_auc_macro"
+    assert config.evaluation.checkpoint_selection.split == config.dataset.validation_split
+    assert config.evaluation.checkpoint_selection.threshold_grid == config.evaluation.threshold_sweep
+    assert config.evaluation.threshold_calibration.enabled is False
+    assert config.evaluation.threshold_calibration.fallback_threshold == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    ("yaml_fragment", "message"),
+    [
+        ("format: full", "training.epoch_snapshots.format"),
+        ("interval: 0", "training.epoch_snapshots.interval"),
+        ("keep_last: 0", "training.epoch_snapshots.keep_last"),
+    ],
+)
+def test_load_config_rejects_invalid_epoch_snapshot_settings(
+    tmp_path: Path, yaml_fragment: str, message: str
+) -> None:
+    """Weights-only snapshots have a deliberately small, strict schema."""
+
+    configuration_error, load_config = _config_api()
+    assert callable(load_config)
+    config_path = tmp_path / "invalid_snapshots.yaml"
+    config_path.write_text(
+        """
+dataset:
+  root: data/aquarium_creature
+  classes: [creature]
+model:
+  input_size: 96
+  output_stride: 8
+training:
+  epoch_snapshots:
+    enabled: true
+    {yaml_fragment}
+""".format(yaml_fragment=yaml_fragment).lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(configuration_error, match=message):
+        load_config(config_path)
 
 
 def test_load_config_accepts_uppercase_train_alias(tmp_path: Path) -> None:
@@ -155,6 +227,99 @@ TRAIN:
     assert config.training.amp is False
     assert config.training.num_workers == 0
     assert config.training.pin_memory is False
+
+
+def test_load_config_reads_automatic_loss_class_weight_settings(tmp_path: Path) -> None:
+    """Auto weights are configured in YAML and resolved only from the train split."""
+
+    _, load_config = _config_api()
+    assert callable(load_config), "fomo_servo.config.load_config must be available"
+    config_path = tmp_path / "auto_weights.yaml"
+    config_path.write_text(
+        """
+dataset:
+  root: data/aquarium_creature
+  classes: [fish, crab]
+model:
+  input_size: 96
+  output_stride: 8
+loss:
+  name: focal_cross_entropy
+  gamma: 2.0
+  class_weights:
+    mode: auto
+    background_weight: 1.0
+    foreground_base_weight: 25.0
+    class_balance: sqrt_inverse_frequency
+    min_foreground_weight: 12.5
+    max_foreground_weight: 75.0
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.loss.class_weight_mode == "auto"
+    assert config.loss.class_weights is None
+    assert config.loss.background_weight == pytest.approx(1.0)
+    assert config.loss.foreground_base_weight == pytest.approx(25.0)
+    assert config.loss.class_balance == "sqrt_inverse_frequency"
+    assert config.loss.min_foreground_weight == pytest.approx(12.5)
+    assert config.loss.max_foreground_weight == pytest.approx(75.0)
+
+
+def test_aug00_none_config_is_fixed_no_augmentation_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The baseline config fixes all training controls and uses manual weight 4."""
+
+    _, load_config = _config_api()
+    assert callable(load_config), "fomo_servo.config.load_config must be available"
+    monkeypatch.setenv("FOMO_DATASET_ROOT", "data/aquarium_pretrain")
+
+    config = load_config(
+        Path(__file__).resolve().parents[1] / "configs" / "experiments" / "aug00_none.yaml"
+    )
+
+    assert config.experiment.name == "aug00_none"
+    assert config.training.epochs == 60
+    assert config.training.early_stopping_patience == 0
+    assert config.loss.class_weight_mode == "manual"
+    assert config.loss.class_weights == (1.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0)
+    assert config.model.input_size == 192
+    assert config.model.output_stride == 8
+    assert config.dataset.train_split == "train"
+    assert config.dataset.validation_split == "val"
+    assert config.postprocess.inference_threshold == pytest.approx(0.5)
+    assert config.evaluation.checkpoint_threshold == pytest.approx(0.5)
+    assert config.evaluation.threshold_sweep_enabled is True
+
+
+def test_aug00_none_locked_config_keeps_the_same_fixed_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The locked baseline has no augmentation and separates both thresholds."""
+
+    _, load_config = _config_api()
+    assert callable(load_config), "fomo_servo.config.load_config must be available"
+    monkeypatch.setenv("FOMO_DATASET_ROOT", "data/aquarium_pretrain")
+
+    config = load_config(
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "experiments"
+        / "aug00_none_locked.yaml"
+    )
+
+    assert config.experiment.name == "aug00_none_locked"
+    assert config.training.output_dir.as_posix().endswith(
+        "outputs/experiments/aug00_none_locked"
+    )
+    assert config.training.epochs == 60
+    assert config.training.early_stopping_patience == 0
+    assert config.loss.class_weights == (1.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0)
+    assert config.postprocess.inference_threshold == pytest.approx(0.5)
+    assert config.evaluation.checkpoint_threshold == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize(

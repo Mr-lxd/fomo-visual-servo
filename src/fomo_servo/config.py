@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+import warnings
+from dataclasses import asdict, dataclass, field
 from math import isfinite
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Tuple, Union
@@ -44,6 +45,20 @@ class ModelConfig:
     backbone: str
     width_multiplier: float
     head_channels: int
+    cut_point: str = "lite_stride8_output"
+    pretrained: bool = False
+    pretrained_source: Optional[Path] = None
+    pretrained_sha256: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class EpochSnapshotConfig:
+    """Weights-only epoch snapshot schedule; disabled by default for compatibility."""
+
+    enabled: bool = False
+    format: str = "weights_only"
+    interval: int = 1
+    keep_last: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +77,8 @@ class TrainingConfig:
     resume: Optional[Path] = None
     early_stopping_patience: int = 0
     early_stopping_min_delta: float = 0.0
+    checkpoint_criterion: str = "grid_f1"
+    epoch_snapshots: EpochSnapshotConfig = field(default_factory=EpochSnapshotConfig)
     optimizer: "OptimizerConfig" = field(
         default_factory=lambda: OptimizerConfig(
             name="adamw", learning_rate=0.001, weight_decay=0.0
@@ -78,7 +95,14 @@ class LossConfig:
 
     name: str
     gamma: float
-    class_weights: Tuple[float, ...]
+    class_weights: Optional[Tuple[float, ...]] = None
+    class_weight_mode: str = "manual"
+    background_weight: float = 1.0
+    object_weight: float = 1.0
+    foreground_base_weight: float = 25.0
+    class_balance: str = "sqrt_inverse_frequency"
+    min_foreground_weight: float = 12.5
+    max_foreground_weight: float = 75.0
 
 
 @dataclass(frozen=True)
@@ -100,6 +124,170 @@ class SchedulerConfig:
 
 
 @dataclass(frozen=True)
+class AugmentationProbabilityConfig:
+    """Configuration shared by one train-only augmentation with one probability."""
+
+    enabled: bool = False
+    probability: float = 0.0
+
+
+@dataclass(frozen=True)
+class ColorJitterConfig(AugmentationProbabilityConfig):
+    """RGB color-jitter parameters."""
+
+    brightness: float = 0.0
+    contrast: float = 0.0
+    saturation: float = 0.0
+    hue: float = 0.0
+
+
+@dataclass(frozen=True)
+class GaussianBlurConfig(AugmentationProbabilityConfig):
+    """Gaussian blur parameters sampled on uint8 RGB images."""
+
+    kernel_sizes: Tuple[int, ...] = (3, 5)
+    sigma_min: float = 0.1
+    sigma_max: float = 1.0
+
+
+@dataclass(frozen=True)
+class GaussianNoiseConfig(AugmentationProbabilityConfig):
+    """Gaussian noise parameters in uint8 pixel units."""
+
+    std_min: float = 2.0
+    std_max: float = 8.0
+
+
+@dataclass(frozen=True)
+class AffineConfig(AugmentationProbabilityConfig):
+    """Mild image/bbox affine transform parameters."""
+
+    scale_min: float = 0.90
+    scale_max: float = 1.10
+    translate_fraction: float = 0.05
+    rotation_degrees: float = 5.0
+    min_visibility: float = 0.25
+    border_value: int = 114
+
+
+@dataclass(frozen=True)
+class AugmentationConfig:
+    """Train-only online augmentation schema with optional preset expansion."""
+
+    enabled: bool = False
+    preset: Optional[str] = None
+    overrides: Mapping[str, Any] = field(default_factory=dict)
+    color_jitter: ColorJitterConfig = field(default_factory=ColorJitterConfig)
+    horizontal_flip: AugmentationProbabilityConfig = field(
+        default_factory=AugmentationProbabilityConfig
+    )
+    gaussian_blur: GaussianBlurConfig = field(
+        default_factory=GaussianBlurConfig
+    )
+    gaussian_noise: GaussianNoiseConfig = field(
+        default_factory=GaussianNoiseConfig
+    )
+    affine: AffineConfig = field(
+        default_factory=AffineConfig
+    )
+
+    @classmethod
+    def disabled(cls) -> "AugmentationConfig":
+        """Return the canonical all-disabled configuration for non-training callers."""
+
+        return cls()
+
+
+@dataclass(frozen=True)
+class PostprocessConfig:
+    """YAML-controlled logits postprocessing and target-selection settings."""
+
+    inference_threshold: Optional[float] = None
+    """Default probability threshold used by image/video inference."""
+
+    # Retained only so callers constructing the old dataclass directly keep
+    # working.  YAML loading warns when this legacy field is used.
+    confidence_threshold: Optional[float] = None
+    class_thresholds: Optional[Tuple[float, ...]] = None
+    component_mode: str = "connected_components"
+    confidence_mode: str = "max"
+    selection_strategy: str = "highest_confidence"
+    max_match_distance_pixels: float = 32.0
+    max_lost_frames: int = 5
+    allowed_class_ids: Optional[Tuple[int, ...]] = None
+
+    def __post_init__(self) -> None:
+        """Resolve the legacy constructor keyword without conflating its purpose."""
+
+        if (
+            self.inference_threshold is not None
+            and self.confidence_threshold is not None
+            and self.inference_threshold != self.confidence_threshold
+        ):
+            raise ValueError(
+                "inference_threshold and legacy confidence_threshold cannot both be set"
+            )
+        if self.inference_threshold is None:
+            object.__setattr__(
+                self,
+                "inference_threshold",
+                0.05 if self.confidence_threshold is None else self.confidence_threshold,
+            )
+
+
+@dataclass(frozen=True)
+class CheckpointSelectionConfig:
+    """Offline candidate selection settings; they do not change training selection."""
+
+    metric: str = "centroid_pr_auc_macro"
+    split: str = "validation"
+    threshold_grid: Tuple[float, ...] = tuple(
+        round(0.05 + index * 0.05, 10) for index in range(19)
+    )
+
+
+@dataclass(frozen=True)
+class ThresholdCalibrationConfig:
+    """Optional offline threshold calibration with explicit split-reuse opt-in."""
+
+    enabled: bool = False
+    split: str = "calibration"
+    objective: str = "centroid_f1"
+    fallback_threshold: float = 0.5
+    allow_selection_split: bool = False
+
+
+@dataclass(frozen=True)
+class EvaluationConfig:
+    """YAML-controlled centroid matching and validation threshold sweep settings."""
+
+    matching_mode: str = "centroid_in_bbox"
+    max_distance_pixels: float = 32.0
+    checkpoint_threshold: float = 0.5
+    threshold_sweep_enabled: bool = True
+    threshold_sweep_minimum: float = 0.05
+    threshold_sweep_maximum: float = 0.95
+    threshold_sweep_step: float = 0.05
+    threshold_sweep: Tuple[float, ...] = tuple(
+        round(0.05 + index * 0.05, 10) for index in range(19)
+    )
+    checkpoint_selection: CheckpointSelectionConfig = field(
+        default_factory=CheckpointSelectionConfig
+    )
+    threshold_calibration: ThresholdCalibrationConfig = field(
+        default_factory=ThresholdCalibrationConfig
+    )
+
+
+@dataclass(frozen=True)
+class ExperimentConfig:
+    """Optional append-only experiment recording settings."""
+
+    name: Optional[str] = None
+    summary_csv: Path = Path("outputs/experiments/experiments_summary.csv")
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     """Validated project configuration with derived FOMO output dimensions."""
 
@@ -107,7 +295,11 @@ class ProjectConfig:
     model: ModelConfig
     loss: LossConfig
     training: TrainingConfig
+    augmentation: AugmentationConfig
+    postprocess: PostprocessConfig
+    evaluation: EvaluationConfig
     source_path: Path
+    experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
 
     @property
     def grid_size(self) -> int:
@@ -120,6 +312,22 @@ class ProjectConfig:
         """Return background plus the configured foreground class count."""
 
         return 1 + len(self.dataset.class_names)
+
+
+def resolved_augmentation_dict(config: AugmentationConfig) -> dict[str, Any]:
+    """Return a JSON-safe fully expanded augmentation mapping."""
+
+    if not isinstance(config, AugmentationConfig):
+        raise TypeError("config must be an AugmentationConfig instance")
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {str(key): normalize(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [normalize(item) for item in value]
+        return value
+
+    return normalize(asdict(config))
 
 
 def load_config(path: ConfigPath) -> ProjectConfig:
@@ -202,19 +410,334 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     head_channels = _optional_positive_integer(
         model_mapping, "head_channels", 32, "model"
     )
+    default_cut_point = (
+        "block_6_expand_relu"
+        if backbone == "mobilenet_v2_fomo"
+        else "lite_stride8_output"
+    )
+    cut_point = _optional_text(
+        model_mapping, "cut_point", default_cut_point, "model"
+    )
+    pretrained = _optional_boolean(
+        model_mapping, "pretrained", False, "model"
+    )
+    pretrained_source = _optional_nullable_path(
+        model_mapping, "pretrained_source", "model"
+    )
+    pretrained_sha256 = _optional_nullable_text(
+        model_mapping, "pretrained_sha256", None, "model"
+    )
+    if pretrained_sha256 is not None:
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", pretrained_sha256):
+            raise ConfigurationError(
+                "model.pretrained_sha256 must be a 64-character hexadecimal SHA-256 string"
+            )
+    expected_cut_points = {
+        "mobilenet_v2_lite": "lite_stride8_output",
+        "mobilenet_v2_fomo": "block_6_expand_relu",
+    }
+    expected_cut_point = expected_cut_points.get(backbone)
+    if expected_cut_point is not None and cut_point != expected_cut_point:
+        raise ConfigurationError(
+            f"model.cut_point must be '{expected_cut_point}' for "
+            f"model.backbone='{backbone}'"
+        )
+    if pretrained and backbone != "mobilenet_v2_fomo":
+        raise ConfigurationError(
+            "model.pretrained is supported only for model.backbone='mobilenet_v2_fomo'"
+        )
+    if pretrained and pretrained_source is None:
+        raise ConfigurationError(
+            "model.pretrained_source is required when model.pretrained is true"
+        )
+    if pretrained and pretrained_sha256 is None:
+        raise ConfigurationError(
+            "model.pretrained_sha256 is required when model.pretrained is true"
+        )
+    if not pretrained and (pretrained_source is not None or pretrained_sha256 is not None):
+        raise ConfigurationError(
+            "model.pretrained_source and model.pretrained_sha256 require model.pretrained=true"
+        )
+
+    augmentation = _parse_augmentation_config(
+        _optional_mapping(payload, "augmentation")
+    )
 
     loss_mapping = _optional_mapping(payload, "loss")
+    if "name" in loss_mapping and "type" in loss_mapping:
+        if loss_mapping["name"] != loss_mapping["type"]:
+            raise ConfigurationError("loss.name and loss.type must match when both are provided")
     loss_name = _optional_text(
-        loss_mapping, "name", "focal_cross_entropy", "loss"
-    )
-    if loss_name not in {"weighted_cross_entropy", "focal_cross_entropy"}:
-        raise ConfigurationError(
-            "loss.name must be 'weighted_cross_entropy' or 'focal_cross_entropy'"
-        )
-    loss_gamma = _optional_nonnegative_float(loss_mapping, "gamma", 2.0, "loss")
-    class_weights = _optional_class_weights(
         loss_mapping,
-        expected_count=1 + len(class_names),
+        "type" if "type" in loss_mapping else "name",
+        "focal_cross_entropy",
+        "loss",
+    )
+    supported_loss_names = {
+        "weighted_cross_entropy",
+        "focal_cross_entropy",
+        "weighted_softmax_ce",
+        "ei_weighted_xent_legacy",
+    }
+    if loss_name not in supported_loss_names:
+        raise ConfigurationError(
+            "loss.type/loss.name must be one of: {}".format(
+                ", ".join(sorted(supported_loss_names))
+            )
+        )
+    is_object_weight_loss = loss_name in {
+        "weighted_softmax_ce",
+        "ei_weighted_xent_legacy",
+    }
+    loss_gamma = _optional_nonnegative_float(
+        loss_mapping, "gamma", 0.0 if is_object_weight_loss else 2.0, "loss"
+    )
+    if is_object_weight_loss:
+        if loss_gamma != 0.0:
+            raise ConfigurationError(
+                "loss.gamma must be 0 for object-weight losses; focal modulation is not supported"
+            )
+        if "class_weights" in loss_mapping and loss_mapping["class_weights"] is not None:
+            raise ConfigurationError(
+                "loss.class_weights must be omitted for object-weight losses; per-class weighting cannot be stacked"
+            )
+        class_weight_mode = "disabled"
+        class_weights = None
+        background_weight = _optional_positive_float(
+            loss_mapping, "background_weight", 1.0, "loss"
+        )
+        foreground_base_weight = 25.0
+        class_balance = "sqrt_inverse_frequency"
+        min_foreground_weight = 12.5
+        max_foreground_weight = 75.0
+    else:
+        (
+            class_weight_mode,
+            class_weights,
+            background_weight,
+            foreground_base_weight,
+            class_balance,
+            min_foreground_weight,
+            max_foreground_weight,
+        ) = _parse_loss_class_weight_settings(
+            loss_mapping,
+            expected_count=1 + len(class_names),
+        )
+    object_weight = _optional_positive_float(
+        loss_mapping, "object_weight", 1.0, "loss"
+    )
+
+    postprocess_mapping = _optional_mapping(payload, "postprocess")
+    has_inference_threshold = "inference_threshold" in postprocess_mapping
+    has_legacy_threshold = "confidence_threshold" in postprocess_mapping
+    if has_inference_threshold and has_legacy_threshold:
+        raise ConfigurationError(
+            "postprocess.inference_threshold and deprecated "
+            "postprocess.confidence_threshold must not both be provided"
+        )
+    legacy_confidence_threshold: Optional[float] = None
+    if has_legacy_threshold:
+        warnings.warn(
+            "postprocess.confidence_threshold is deprecated; use "
+            "postprocess.inference_threshold. It controls inference only; "
+            "evaluation.checkpoint_threshold is independent.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        legacy_confidence_threshold = _optional_probability(
+            postprocess_mapping, "confidence_threshold", 0.05, "postprocess"
+        )
+    inference_threshold = _optional_probability(
+        postprocess_mapping,
+        "inference_threshold",
+        0.05 if legacy_confidence_threshold is None else legacy_confidence_threshold,
+        "postprocess",
+    )
+    class_thresholds = _optional_class_thresholds(
+        postprocess_mapping, "class_thresholds", class_names, "postprocess"
+    )
+    component_mode = _optional_text(
+        postprocess_mapping, "component_mode", "connected_components", "postprocess"
+    )
+    if component_mode not in {"connected_components", "local_peaks"}:
+        raise ConfigurationError(
+            "postprocess.component_mode must be 'connected_components' or 'local_peaks'"
+        )
+    confidence_mode = _optional_text(
+        postprocess_mapping, "confidence_mode", "max", "postprocess"
+    )
+    if confidence_mode not in {"max", "mean"}:
+        raise ConfigurationError("postprocess.confidence_mode must be 'max' or 'mean'")
+    selection_strategy = _optional_text(
+        postprocess_mapping, "selection_strategy", "highest_confidence", "postprocess"
+    )
+    if selection_strategy not in {
+        "highest_confidence",
+        "largest_component",
+        "nearest_previous",
+    }:
+        raise ConfigurationError(
+            "postprocess.selection_strategy is not a supported target strategy"
+        )
+    max_match_distance_pixels = _optional_nonnegative_float(
+        postprocess_mapping, "max_match_distance_pixels", 32.0, "postprocess"
+    )
+    max_lost_frames = _optional_nonnegative_integer(
+        postprocess_mapping, "max_lost_frames", 5, "postprocess"
+    )
+    allowed_class_ids = _optional_class_ids(
+        postprocess_mapping, "allowed_class_ids", len(class_names), "postprocess"
+    )
+
+    evaluation_mapping = _optional_mapping(payload, "evaluation")
+    matching_mode = _optional_text(
+        evaluation_mapping, "matching_mode", "centroid_in_bbox", "evaluation"
+    )
+    if matching_mode not in {"centroid_in_bbox", "max_distance_pixels"}:
+        raise ConfigurationError(
+            "evaluation.matching_mode must be 'centroid_in_bbox' or 'max_distance_pixels'"
+        )
+    max_distance_pixels = _optional_nonnegative_float(
+        evaluation_mapping, "max_distance_pixels", 32.0, "evaluation"
+    )
+    checkpoint_threshold = _optional_probability(
+        evaluation_mapping, "checkpoint_threshold", 0.5, "evaluation"
+    )
+    threshold_sweep_value = evaluation_mapping.get("threshold_sweep")
+    if isinstance(threshold_sweep_value, Mapping):
+        threshold_sweep_enabled = _optional_boolean(
+            threshold_sweep_value, "enabled", True, "evaluation.threshold_sweep"
+        )
+        threshold_sweep_minimum = _optional_probability(
+            threshold_sweep_value, "minimum", 0.05, "evaluation.threshold_sweep"
+        )
+        threshold_sweep_maximum = _optional_probability(
+            threshold_sweep_value, "maximum", 0.95, "evaluation.threshold_sweep"
+        )
+        threshold_sweep_step = _optional_positive_float(
+            threshold_sweep_value, "step", 0.05, "evaluation.threshold_sweep"
+        )
+        if threshold_sweep_minimum > threshold_sweep_maximum:
+            raise ConfigurationError(
+                "evaluation.threshold_sweep.minimum must not exceed maximum"
+            )
+        threshold_sweep = _build_threshold_sweep(
+            threshold_sweep_minimum,
+            threshold_sweep_maximum,
+            threshold_sweep_step,
+            checkpoint_threshold,
+            enabled=threshold_sweep_enabled,
+        )
+    else:
+        threshold_sweep = _optional_probability_sequence(
+            evaluation_mapping,
+            "threshold_sweep",
+            tuple(round(0.05 + index * 0.05, 10) for index in range(19)),
+            "evaluation",
+        )
+        threshold_sweep_enabled = True
+        threshold_sweep_minimum = threshold_sweep[0]
+        threshold_sweep_maximum = threshold_sweep[-1]
+        threshold_sweep_step = (
+            threshold_sweep[1] - threshold_sweep[0]
+            if len(threshold_sweep) > 1
+            else 0.05
+        )
+    selection_mapping = _optional_mapping(evaluation_mapping, "checkpoint_selection")
+    selection_metric = _optional_text(
+        selection_mapping,
+        "metric",
+        "centroid_pr_auc_macro",
+        "evaluation.checkpoint_selection",
+    )
+    if selection_metric not in {
+        "centroid_pr_auc_macro",
+        "max_centroid_f1_over_thresholds",
+    }:
+        raise ConfigurationError(
+            "evaluation.checkpoint_selection.metric must be "
+            "'centroid_pr_auc_macro' or 'max_centroid_f1_over_thresholds'"
+        )
+    selection_split = _optional_text(
+        selection_mapping,
+        "split",
+        validation_split,
+        "evaluation.checkpoint_selection",
+    )
+    selection_grid_mapping = selection_mapping.get("threshold_grid")
+    if selection_grid_mapping is None:
+        selection_threshold_grid = threshold_sweep
+    elif not isinstance(selection_grid_mapping, Mapping):
+        raise ConfigurationError("evaluation.checkpoint_selection.threshold_grid must be a mapping")
+    else:
+        selection_minimum = _optional_probability(
+            selection_grid_mapping,
+            "minimum",
+            threshold_sweep_minimum,
+            "evaluation.checkpoint_selection.threshold_grid",
+        )
+        selection_maximum = _optional_probability(
+            selection_grid_mapping,
+            "maximum",
+            threshold_sweep_maximum,
+            "evaluation.checkpoint_selection.threshold_grid",
+        )
+        selection_step = _optional_positive_float(
+            selection_grid_mapping,
+            "step",
+            threshold_sweep_step,
+            "evaluation.checkpoint_selection.threshold_grid",
+        )
+        if selection_minimum > selection_maximum:
+            raise ConfigurationError(
+                "evaluation.checkpoint_selection.threshold_grid.minimum must not exceed maximum"
+            )
+        selection_threshold_grid = _build_threshold_sweep(
+            selection_minimum,
+            selection_maximum,
+            selection_step,
+            checkpoint_threshold,
+            enabled=True,
+        )
+    calibration_mapping = _optional_mapping(evaluation_mapping, "threshold_calibration")
+    calibration_enabled = _optional_boolean(
+        calibration_mapping, "enabled", False, "evaluation.threshold_calibration"
+    )
+    calibration_split = _optional_text(
+        calibration_mapping, "split", "calibration", "evaluation.threshold_calibration"
+    )
+    calibration_objective = _optional_text(
+        calibration_mapping,
+        "objective",
+        "centroid_f1",
+        "evaluation.threshold_calibration",
+    )
+    if calibration_objective != "centroid_f1":
+        raise ConfigurationError(
+            "evaluation.threshold_calibration.objective must be 'centroid_f1'"
+        )
+    calibration_fallback_threshold = _optional_probability(
+        calibration_mapping,
+        "fallback_threshold",
+        checkpoint_threshold,
+        "evaluation.threshold_calibration",
+    )
+    calibration_allow_selection_split = _optional_boolean(
+        calibration_mapping,
+        "allow_selection_split",
+        False,
+        "evaluation.threshold_calibration",
+    )
+
+    experiment_mapping = _optional_mapping(payload, "experiment")
+    experiment_name = _optional_nullable_text(
+        experiment_mapping, "name", None, "experiment"
+    )
+    experiment_summary_csv = _optional_path(
+        experiment_mapping,
+        "summary_csv",
+        "outputs/experiments/experiments_summary.csv",
+        "experiment",
     )
 
     training_mapping = _training_mapping(payload)
@@ -243,6 +766,30 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     )
     early_stopping_min_delta = _optional_nonnegative_float(
         training_mapping, "early_stopping_min_delta", 0.0, "training"
+    )
+    checkpoint_criterion = _optional_text(
+        training_mapping, "checkpoint_criterion", "grid_f1", "training"
+    )
+    if checkpoint_criterion not in {"grid_f1", "centroid_f1"}:
+        raise ConfigurationError(
+            "training.checkpoint_criterion must be 'grid_f1' or 'centroid_f1'"
+        )
+    snapshot_mapping = _optional_mapping(training_mapping, "epoch_snapshots")
+    snapshot_enabled = _optional_boolean(
+        snapshot_mapping, "enabled", False, "training.epoch_snapshots"
+    )
+    snapshot_format = _optional_text(
+        snapshot_mapping, "format", "weights_only", "training.epoch_snapshots"
+    )
+    if snapshot_format != "weights_only":
+        raise ConfigurationError(
+            "training.epoch_snapshots.format must be 'weights_only'"
+        )
+    snapshot_interval = _optional_positive_integer(
+        snapshot_mapping, "interval", 1, "training.epoch_snapshots"
+    )
+    snapshot_keep_last = _optional_nullable_positive_integer(
+        snapshot_mapping, "keep_last", "training.epoch_snapshots"
     )
     optimizer_mapping = _optional_mapping(training_mapping, "optimizer")
     optimizer_name = _optional_text(
@@ -287,11 +834,22 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             backbone=backbone,
             width_multiplier=width_multiplier,
             head_channels=head_channels,
+            cut_point=cut_point,
+            pretrained=pretrained,
+            pretrained_source=pretrained_source,
+            pretrained_sha256=pretrained_sha256.lower() if pretrained_sha256 else None,
         ),
         loss=LossConfig(
             name=loss_name,
             gamma=loss_gamma,
             class_weights=class_weights,
+            class_weight_mode=class_weight_mode,
+            background_weight=background_weight,
+            object_weight=object_weight,
+            foreground_base_weight=foreground_base_weight,
+            class_balance=class_balance,
+            min_foreground_weight=min_foreground_weight,
+            max_foreground_weight=max_foreground_weight,
         ),
         training=TrainingConfig(
             device=device,
@@ -306,6 +864,13 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             resume=resume,
             early_stopping_patience=early_stopping_patience,
             early_stopping_min_delta=early_stopping_min_delta,
+            checkpoint_criterion=checkpoint_criterion,
+            epoch_snapshots=EpochSnapshotConfig(
+                enabled=snapshot_enabled,
+                format=snapshot_format,
+                interval=snapshot_interval,
+                keep_last=snapshot_keep_last,
+            ),
             optimizer=OptimizerConfig(
                 name=optimizer_name,
                 learning_rate=learning_rate,
@@ -317,7 +882,218 @@ def load_config(path: ConfigPath) -> ProjectConfig:
                 gamma=scheduler_gamma,
             ),
         ),
+        augmentation=augmentation,
+        postprocess=PostprocessConfig(
+            inference_threshold=inference_threshold,
+            confidence_threshold=legacy_confidence_threshold,
+            class_thresholds=class_thresholds,
+            component_mode=component_mode,
+            confidence_mode=confidence_mode,
+            selection_strategy=selection_strategy,
+            max_match_distance_pixels=max_match_distance_pixels,
+            max_lost_frames=max_lost_frames,
+            allowed_class_ids=allowed_class_ids,
+        ),
+        evaluation=EvaluationConfig(
+            matching_mode=matching_mode,
+            max_distance_pixels=max_distance_pixels,
+            checkpoint_threshold=checkpoint_threshold,
+            threshold_sweep_enabled=threshold_sweep_enabled,
+            threshold_sweep_minimum=threshold_sweep_minimum,
+            threshold_sweep_maximum=threshold_sweep_maximum,
+            threshold_sweep_step=threshold_sweep_step,
+            threshold_sweep=threshold_sweep,
+            checkpoint_selection=CheckpointSelectionConfig(
+                metric=selection_metric,
+                split=selection_split,
+                threshold_grid=selection_threshold_grid,
+            ),
+            threshold_calibration=ThresholdCalibrationConfig(
+                enabled=calibration_enabled,
+                split=calibration_split,
+                objective=calibration_objective,
+                fallback_threshold=calibration_fallback_threshold,
+                allow_selection_split=calibration_allow_selection_split,
+            ),
+        ),
         source_path=source_path,
+        experiment=ExperimentConfig(
+            name=experiment_name,
+            summary_csv=experiment_summary_csv,
+        ),
+    )
+
+
+def _parse_augmentation_config(
+    payload: Mapping[str, Any]
+) -> AugmentationConfig:
+    """Parse legacy inline fields or a fully expanded augmentation preset."""
+
+    from fomo_servo.datasets.presets import (
+        KNOWN_AUGMENTATION_FIELDS,
+        known_operation_fields,
+        resolve_preset_mapping,
+    )
+
+    if any(not isinstance(key, str) for key in payload):
+        raise ConfigurationError("augmentation keys must be strings")
+    unknown = sorted(set(payload).difference(KNOWN_AUGMENTATION_FIELDS))
+    if unknown:
+        raise ConfigurationError(
+            "unknown augmentation field(s): {}".format(", ".join(unknown))
+        )
+    enabled = _optional_boolean(payload, "enabled", False, "augmentation")
+    has_preset = "preset" in payload
+    preset = payload.get("preset")
+    overrides = payload.get("overrides", {})
+    if not isinstance(overrides, Mapping):
+        raise ConfigurationError("augmentation.overrides must be a mapping")
+    if has_preset and (not isinstance(preset, str) or not preset.strip()):
+        raise ConfigurationError("augmentation.preset must be a non-empty string")
+    if not has_preset:
+        preset = None
+        if payload:
+            warnings.warn(
+                "inline augmentation fields are deprecated; use augmentation.preset and overrides",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+        resolved: dict[str, Any] = {
+            "color_jitter": {},
+            "horizontal_flip": {},
+            "gaussian_blur": {},
+            "gaussian_noise": {},
+            "affine": {},
+        }
+    else:
+        try:
+            resolved = resolve_preset_mapping(str(preset), overrides)
+        except ValueError as error:
+            raise ConfigurationError(str(error)) from error
+
+    for operation in (
+        "color_jitter",
+        "horizontal_flip",
+        "gaussian_blur",
+        "gaussian_noise",
+        "affine",
+    ):
+        if operation not in payload:
+            continue
+        mapping = _optional_mapping(payload, operation)
+        operation_fields = known_operation_fields(operation)
+        if any(not isinstance(key, str) for key in mapping):
+            raise ConfigurationError("augmentation.{} keys must be strings".format(operation))
+        unknown_fields = sorted(set(mapping).difference(operation_fields))
+        if unknown_fields:
+            raise ConfigurationError(
+                "unknown augmentation.{} field(s): {}".format(
+                    operation, ", ".join(unknown_fields)
+                )
+            )
+        resolved.setdefault(operation, {}).update(mapping)
+
+    color_mapping = _optional_mapping(resolved, "color_jitter")
+    color_jitter = ColorJitterConfig(
+        enabled=_optional_boolean(color_mapping, "enabled", False, "augmentation.color_jitter"),
+        probability=_optional_probability(color_mapping, "probability", 0.0, "augmentation.color_jitter"),
+        brightness=_optional_nonnegative_float(color_mapping, "brightness", 0.0, "augmentation.color_jitter"),
+        contrast=_optional_nonnegative_float(color_mapping, "contrast", 0.0, "augmentation.color_jitter"),
+        saturation=_optional_nonnegative_float(color_mapping, "saturation", 0.0, "augmentation.color_jitter"),
+        hue=_optional_nonnegative_float(color_mapping, "hue", 0.0, "augmentation.color_jitter"),
+    )
+    blur_mapping = _optional_mapping(resolved, "gaussian_blur")
+    kernel_sizes = _optional_integer_sequence(
+        blur_mapping, "kernel_sizes", (3, 5), "augmentation.gaussian_blur"
+    )
+    if any(value % 2 == 0 for value in kernel_sizes):
+        raise ConfigurationError("augmentation.gaussian_blur.kernel_sizes must contain odd integers")
+    blur_sigma_min = _optional_nonnegative_float(
+        blur_mapping, "sigma_min", 0.1, "augmentation.gaussian_blur"
+    )
+    blur_sigma_max = _optional_nonnegative_float(
+        blur_mapping, "sigma_max", 1.0, "augmentation.gaussian_blur"
+    )
+    if blur_sigma_min > blur_sigma_max:
+        raise ConfigurationError("augmentation.gaussian_blur.sigma_min must not exceed sigma_max")
+    noise_mapping = _optional_mapping(resolved, "gaussian_noise")
+    noise_std_min = _optional_nonnegative_float(
+        noise_mapping, "std_min", 2.0, "augmentation.gaussian_noise"
+    )
+    noise_std_max = _optional_nonnegative_float(
+        noise_mapping, "std_max", 8.0, "augmentation.gaussian_noise"
+    )
+    if noise_std_min > noise_std_max:
+        raise ConfigurationError("augmentation.gaussian_noise.std_min must not exceed std_max")
+    affine_mapping = _optional_mapping(resolved, "affine")
+    scale_min = _optional_positive_float(
+        affine_mapping, "scale_min", 0.90, "augmentation.affine"
+    )
+    scale_max = _optional_positive_float(
+        affine_mapping, "scale_max", 1.10, "augmentation.affine"
+    )
+    if scale_min > scale_max:
+        raise ConfigurationError("augmentation.affine.scale_min must not exceed scale_max")
+    border_value = affine_mapping.get("border_value", 114)
+    if isinstance(border_value, bool) or not isinstance(border_value, int) or not 0 <= border_value <= 255:
+        raise ConfigurationError("augmentation.affine.border_value must be an integer in [0,255]")
+    return AugmentationConfig(
+        enabled=enabled,
+        preset=str(preset) if preset is not None else None,
+        overrides=dict(overrides) if isinstance(overrides, Mapping) else {},
+        color_jitter=color_jitter,
+        horizontal_flip=_parse_augmentation_probability_mapping(
+            resolved, "horizontal_flip"
+        ),
+        gaussian_blur=GaussianBlurConfig(
+            enabled=_optional_boolean(blur_mapping, "enabled", False, "augmentation.gaussian_blur"),
+            probability=_optional_probability(blur_mapping, "probability", 0.0, "augmentation.gaussian_blur"),
+            kernel_sizes=kernel_sizes,
+            sigma_min=blur_sigma_min,
+            sigma_max=blur_sigma_max,
+        ),
+        gaussian_noise=GaussianNoiseConfig(
+            enabled=_optional_boolean(noise_mapping, "enabled", False, "augmentation.gaussian_noise"),
+            probability=_optional_probability(noise_mapping, "probability", 0.0, "augmentation.gaussian_noise"),
+            std_min=noise_std_min,
+            std_max=noise_std_max,
+        ),
+        affine=AffineConfig(
+            enabled=_optional_boolean(affine_mapping, "enabled", False, "augmentation.affine"),
+            probability=_optional_probability(affine_mapping, "probability", 0.0, "augmentation.affine"),
+            scale_min=scale_min,
+            scale_max=scale_max,
+            translate_fraction=_optional_nonnegative_float(affine_mapping, "translate_fraction", 0.05, "augmentation.affine"),
+            rotation_degrees=_optional_nonnegative_float(affine_mapping, "rotation_degrees", 5.0, "augmentation.affine"),
+            min_visibility=_optional_probability(affine_mapping, "min_visibility", 0.25, "augmentation.affine"),
+            border_value=border_value,
+        ),
+    )
+
+
+def _parse_augmentation_probability(
+    payload: Mapping[str, Any], name: str
+) -> AugmentationProbabilityConfig:
+    """Parse one future augmentation operation's enabled/probability fields."""
+
+    mapping = _optional_mapping(payload, name)
+    return AugmentationProbabilityConfig(
+        enabled=_optional_boolean(mapping, "enabled", False, "augmentation." + name),
+        probability=_optional_probability(
+            mapping, "probability", 0.0, "augmentation." + name
+        ),
+    )
+
+
+def _parse_augmentation_probability_mapping(
+    payload: Mapping[str, Any], name: str
+) -> AugmentationProbabilityConfig:
+    """Parse an already-resolved operation mapping."""
+
+    mapping = _optional_mapping(payload, name)
+    return AugmentationProbabilityConfig(
+        enabled=_optional_boolean(mapping, "enabled", False, "augmentation." + name),
+        probability=_optional_probability(mapping, "probability", 0.0, "augmentation." + name),
     )
 
 
@@ -422,6 +1198,125 @@ def _optional_text(
     return value
 
 
+def _optional_nullable_text(
+    payload: Mapping[str, Any],
+    name: str,
+    default: Optional[str],
+    section: str,
+) -> Optional[str]:
+    """Return an optional non-empty text value or ``None``."""
+
+    value = payload.get(name, default)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigurationError(
+            "{}.{} must be null or a non-empty string".format(section, name)
+        )
+    return value
+
+
+def _optional_probability(
+    payload: Mapping[str, Any], name: str, default: float, section: str
+) -> float:
+    value = payload.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or not 0.0 <= value <= 1.0:
+        raise ConfigurationError("{}.{} must be a finite probability in [0,1]".format(section, name))
+    return float(value)
+
+
+def _optional_probability_sequence(
+    payload: Mapping[str, Any],
+    name: str,
+    default: Sequence[float],
+    section: str,
+) -> Tuple[float, ...]:
+    value = payload.get(name, default)
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or not value:
+        raise ConfigurationError("{}.{} must be a non-empty probability list".format(section, name))
+    return tuple(
+        _optional_probability({"value": item}, "value", 0.0, section)
+        for item in value
+    )
+
+
+def _build_threshold_sweep(
+    minimum: float,
+    maximum: float,
+    step: float,
+    checkpoint_threshold: float,
+    *,
+    enabled: bool,
+) -> Tuple[float, ...]:
+    """Build deterministic inclusive sweep values from YAML range settings."""
+
+    if not enabled:
+        # A disabled sweep still leaves a valid final report at the locked
+        # checkpoint threshold, but it cannot select a different threshold.
+        return (float(checkpoint_threshold),)
+    values = []
+    current = float(minimum)
+    tolerance = max(1e-10, abs(step) * 1e-8)
+    while current <= maximum + tolerance:
+        values.append(round(min(current, maximum), 10))
+        current += step
+    if not values:
+        values.append(float(minimum))
+    if values[-1] < maximum - tolerance:
+        values.append(float(maximum))
+    return tuple(values)
+
+
+def _optional_class_thresholds(
+    payload: Mapping[str, Any],
+    name: str,
+    class_names: Sequence[str],
+    section: str,
+) -> Optional[Tuple[float, ...]]:
+    value = payload.get(name)
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        thresholds = [None] * len(class_names)
+        for raw_key, raw_value in value.items():
+            if isinstance(raw_key, bool) or not isinstance(raw_key, (int, str)):
+                raise ConfigurationError("{}.{} keys must be class IDs or names".format(section, name))
+            if isinstance(raw_key, int):
+                class_id = raw_key
+            else:
+                if raw_key not in class_names:
+                    raise ConfigurationError("unknown class name '{}' in {}.{}".format(raw_key, section, name))
+                class_id = class_names.index(raw_key)
+            if not 0 <= class_id < len(class_names):
+                raise ConfigurationError("{}.{} class ID is outside dataset classes".format(section, name))
+            thresholds[class_id] = _optional_probability({"value": raw_value}, "value", 0.0, section)
+        if any(item is None for item in thresholds):
+            raise ConfigurationError("{}.{} must specify every dataset class".format(section, name))
+        return tuple(float(item) for item in thresholds)
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or len(value) != len(class_names):
+        raise ConfigurationError("{}.{} must contain one value per dataset class".format(section, name))
+    return tuple(
+        _optional_probability({"value": item}, "value", 0.0, section)
+        for item in value
+    )
+
+
+def _optional_class_ids(
+    payload: Mapping[str, Any], name: str, class_count: int, section: str
+) -> Optional[Tuple[int, ...]]:
+    value = payload.get(name)
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ConfigurationError("{}.{} must be a list of class IDs".format(section, name))
+    output = []
+    for index in value:
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < class_count:
+            raise ConfigurationError("{}.{} contains an invalid class ID".format(section, name))
+        output.append(index)
+    return tuple(output)
+
+
 def _optional_positive_float(
     payload: Mapping[str, Any], name: str, default: float, section: str
 ) -> float:
@@ -462,6 +1357,21 @@ def _optional_positive_integer(
     return value
 
 
+def _optional_nullable_positive_integer(
+    payload: Mapping[str, Any], name: str, section: str
+) -> Optional[int]:
+    """Return null or a strictly positive integer from a YAML mapping."""
+
+    value = payload.get(name)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ConfigurationError(
+            "{}.{} must be null or a positive integer".format(section, name)
+        )
+    return value
+
+
 def _optional_nonnegative_integer(
     payload: Mapping[str, Any], name: str, default: int, section: str
 ) -> int:
@@ -475,6 +1385,27 @@ def _optional_nonnegative_integer(
     return value
 
 
+def _optional_integer_sequence(
+    payload: Mapping[str, Any],
+    name: str,
+    default: Sequence[int],
+    section: str,
+) -> Tuple[int, ...]:
+    """Return a non-empty YAML sequence of positive integers."""
+
+    value = payload.get(name, default)
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or not value:
+        raise ConfigurationError("{}.{} must be a non-empty integer list".format(section, name))
+    result = []
+    for index, item in enumerate(value):
+        if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+            raise ConfigurationError(
+                "{}.{}[{}] must be a positive integer".format(section, name, index)
+            )
+        result.append(int(item))
+    return tuple(result)
+
+
 def _optional_boolean(
     payload: Mapping[str, Any], name: str, default: bool, section: str
 ) -> bool:
@@ -486,12 +1417,81 @@ def _optional_boolean(
     return value
 
 
-def _optional_class_weights(
+def _parse_loss_class_weight_settings(
     payload: Mapping[str, Any], expected_count: int
-) -> Tuple[float, ...]:
-    """Validate background-plus-foreground class weights from the loss YAML block."""
+) -> tuple[str, Optional[Tuple[float, ...]], float, float, str, float, float]:
+    """Parse legacy manual lists or explicit ``manual``/``auto`` loss weighting.
+
+    The legacy form ``class_weights: [background, class_0, ...]`` remains manual.
+    The explicit form is a mapping with ``mode``.  In manual mode it must include
+    ``values``; automatic mode receives its balancing parameters in the same
+    mapping and derives foreground weights from the training heatmaps.
+    """
 
     raw_weights = payload.get("class_weights", [1.0] * expected_count)
+    defaults = (1.0, 25.0, "sqrt_inverse_frequency", 12.5, 75.0)
+    if not isinstance(raw_weights, Mapping):
+        return (
+            "manual",
+            _validate_class_weight_sequence(raw_weights, expected_count),
+            *defaults,
+        )
+
+    mode = _optional_text(raw_weights, "mode", "manual", "loss.class_weights")
+    if mode == "manual":
+        if "values" not in raw_weights:
+            raise ConfigurationError(
+                "loss.class_weights.values is required when loss.class_weights.mode is 'manual'"
+            )
+        return (
+            "manual",
+            _validate_class_weight_sequence(raw_weights["values"], expected_count),
+            *defaults,
+        )
+    if mode != "auto":
+        raise ConfigurationError(
+            "loss.class_weights.mode must be 'manual' or 'auto'"
+        )
+
+    background_weight = _optional_positive_float(
+        raw_weights, "background_weight", 1.0, "loss.class_weights"
+    )
+    foreground_base_weight = _optional_positive_float(
+        raw_weights, "foreground_base_weight", 25.0, "loss.class_weights"
+    )
+    class_balance = _optional_text(
+        raw_weights, "class_balance", "sqrt_inverse_frequency", "loss.class_weights"
+    )
+    if class_balance != "sqrt_inverse_frequency":
+        raise ConfigurationError(
+            "loss.class_weights.class_balance must be 'sqrt_inverse_frequency'"
+        )
+    min_foreground_weight = _optional_positive_float(
+        raw_weights, "min_foreground_weight", 12.5, "loss.class_weights"
+    )
+    max_foreground_weight = _optional_positive_float(
+        raw_weights, "max_foreground_weight", 75.0, "loss.class_weights"
+    )
+    if min_foreground_weight > max_foreground_weight:
+        raise ConfigurationError(
+            "loss.class_weights.min_foreground_weight must not exceed max_foreground_weight"
+        )
+    return (
+        "auto",
+        None,
+        background_weight,
+        foreground_base_weight,
+        class_balance,
+        min_foreground_weight,
+        max_foreground_weight,
+    )
+
+
+def _validate_class_weight_sequence(
+    raw_weights: Any, expected_count: int
+) -> Tuple[float, ...]:
+    """Validate a background-plus-foreground manual weight sequence."""
+
     if not isinstance(raw_weights, Sequence) or isinstance(raw_weights, (str, bytes)):
         raise ConfigurationError("loss.class_weights must be a list of positive numbers")
     if len(raw_weights) != expected_count:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import importlib
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -42,6 +43,7 @@ def _write_training_config(
     *,
     epochs: int,
     resume: Path | None = None,
+    epoch_snapshots_yaml: str = "",
 ) -> Path:
     """Write a complete YAML run config for the synthetic two-class YOLO fixture."""
 
@@ -77,6 +79,7 @@ training:
   resume: {resume}
   early_stopping_patience: 0
   early_stopping_min_delta: 0.0
+{epoch_snapshots_yaml}
   optimizer:
     name: adamw
     learning_rate: 0.001
@@ -90,10 +93,46 @@ training:
             epochs=epochs,
             output_dir=output_dir.as_posix(),
             resume=resume_text,
+            epoch_snapshots_yaml=epoch_snapshots_yaml,
         ).lstrip(),
         encoding="utf-8",
     )
     return path
+
+
+def test_epoch_snapshot_interval_writes_weights_only_without_changing_legacy_checkpoints(
+    tmp_path: Path,
+) -> None:
+    """v2 snapshots are opt-in and leave full checkpoint protocol intact."""
+
+    _, run_training, _ = _engine_api()
+    assert callable(run_training)
+    output_dir = tmp_path / "snapshot-run"
+    config = load_config(
+        _write_training_config(
+            tmp_path / "snapshot.yaml",
+            output_dir,
+            epochs=2,
+            epoch_snapshots_yaml=(
+                "  epoch_snapshots:\n"
+                "    enabled: true\n"
+                "    format: weights_only\n"
+                "    interval: 2\n"
+                "    keep_last: null"
+            ),
+        )
+    )
+
+    run_training(config, device_override="cpu")
+
+    snapshots = sorted((output_dir / "epoch_snapshots").glob("*.pt"))
+    assert [path.name for path in snapshots] == ["epoch_002_weights.pt"]
+    payload = torch.load(snapshots[0], map_location="cpu", weights_only=False)
+    assert payload["checkpoint_kind"] == "epoch_snapshot"
+    assert "optimizer_state" not in payload
+    assert (output_dir / "last.pt").is_file()
+    legacy_payload = torch.load(output_dir / "last.pt", map_location="cpu", weights_only=False)
+    assert "optimizer_state" in legacy_payload
 
 
 def test_collate_fomo_samples_returns_training_tensor_contract() -> None:
@@ -131,6 +170,20 @@ def test_ensure_finite_gradients_rejects_infinite_gradient() -> None:
         gradient_guard(model)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_cuda_mapped_resume_rng_state_restores_cpu_torch_state() -> None:
+    """CUDA-mapped checkpoints must restore the CPU RNG state without error."""
+
+    from fomo_servo.training.engine import _capture_rng_state, _restore_rng_state
+
+    state = _capture_rng_state()
+    cuda_mapped_state = dict(state)
+    cuda_mapped_state["torch"] = state["torch"].to("cuda")
+    cuda_mapped_state["cuda"] = [item.to("cuda") for item in state["cuda"]]
+
+    _restore_rng_state(cuda_mapped_state)
+
+
 def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path) -> None:
     """The fixture dataset must train for two CPU epochs, persist state, then resume."""
 
@@ -145,15 +198,60 @@ def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path)
 
     last_checkpoint = output_dir / "last.pt"
     best_checkpoint = output_dir / "best_val_f1.pt"
+    best_grid_checkpoint = output_dir / "best_grid_f1.pt"
+    best_centroid_checkpoint = output_dir / "best_centroid_f1.pt"
     history_path = output_dir / "history.csv"
+    summary_path = output_dir / "training_summary.json"
     assert first_summary.completed_epochs == 2
     assert first_summary.best_val_f1 >= 0.0
     assert last_checkpoint.is_file()
     assert best_checkpoint.is_file()
+    assert best_grid_checkpoint.is_file()
+    assert best_centroid_checkpoint.is_file()
+    assert not (output_dir / "epoch_snapshots").exists()
+    assert summary_path.is_file()
+    checkpoint_payload = torch.load(last_checkpoint, map_location="cpu", weights_only=False)
+    assert checkpoint_payload["checkpoint_type"] == "last"
+    assert checkpoint_payload["selection_metric"] == "last"
+    assert checkpoint_payload["selection_threshold"] == pytest.approx(0.5)
+    assert checkpoint_payload["centroid_f1"] >= 0.0
+    assert checkpoint_payload["class_weight_mode"] == "manual"
+    assert checkpoint_payload["class_weights"] == [1.0, 3.0]
+    assert len(checkpoint_payload["class_statistics"]) == 1
+    assert checkpoint_payload["augmentation_preset"] is None
+    assert "color_jitter" in checkpoint_payload["resolved_augmentation"]
+    assert checkpoint_payload["augmentation_stats"]["total_samples"] > 0
+    assert checkpoint_payload["model_metadata"]["backbone_name"] == "mobilenet_v2_lite"
+    assert checkpoint_payload["model_metadata"]["initialization"] == "pytorch_module_defaults"
+    training_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert training_summary["class_weight_mode"] == "manual"
+    assert training_summary["class_weights"] == [1.0, 3.0]
+    assert len(training_summary["class_statistics"]) == 1
+    assert training_summary["best_grid_epoch"] >= 1
+    assert training_summary["best_centroid_epoch"] >= 1
+    assert training_summary["checkpoint_threshold"] == pytest.approx(0.5)
+    assert training_summary["best_val_f1_alias_target"] == "best_grid_f1.pt"
+    assert len(training_summary["augmentation_epoch_stats"]) == 2
+    assert training_summary["model_metadata"] == checkpoint_payload["model_metadata"]
+    assert [item["epoch"] for item in training_summary["augmentation_epoch_stats"]] == [1, 2]
     with history_path.open("r", newline="", encoding="utf-8") as history_file:
         first_rows = list(csv.DictReader(history_file))
     assert len(first_rows) == 2
-    assert set(("train_loss", "val_loss", "precision", "recall", "f1")).issubset(
+    assert "augmentation_stats" in first_rows[0]
+    assert set(
+        (
+            "train_loss",
+            "val_loss",
+            "grid_precision",
+            "grid_recall",
+            "grid_f1",
+            "centroid_precision",
+            "centroid_recall",
+            "centroid_f1",
+            "mean_count_bias",
+            "mean_absolute_count_error",
+        )
+    ).issubset(
         first_rows[0]
     )
 
@@ -169,3 +267,122 @@ def test_cpu_two_epoch_smoke_saves_best_last_history_and_resumes(tmp_path: Path)
     with history_path.open("r", newline="", encoding="utf-8") as history_file:
         resumed_rows = list(csv.DictReader(history_file))
     assert len(resumed_rows) == 3
+    resumed_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert resumed_summary["augmentation_epoch_stats"][-1]["epoch"] == 3
+
+
+def test_new_backbone_metadata_is_persisted_in_training_artifacts(
+    tmp_path: Path,
+) -> None:
+    """A real one-epoch CPU run must persist exact new-topology identity."""
+
+    _, run_training, _ = _engine_api()
+    assert callable(run_training)
+    output_dir = tmp_path / "new-backbone-run"
+    config_path = _write_training_config(
+        tmp_path / "new-backbone.yaml", output_dir, epochs=1
+    )
+    payload = config_path.read_text(encoding="utf-8").replace(
+        "  backbone: mobilenet_v2_lite\n",
+        "  backbone: mobilenet_v2_fomo\n"
+        "  cut_point: block_6_expand_relu\n"
+        "  pretrained: false\n",
+    )
+    config_path.write_text(payload, encoding="utf-8")
+
+    summary = run_training(load_config(config_path), device_override="cpu")
+    checkpoint = torch.load(
+        output_dir / "last.pt", map_location="cpu", weights_only=False
+    )
+    persisted_summary = json.loads(
+        (output_dir / "training_summary.json").read_text(encoding="utf-8")
+    )
+    expected = {
+        "backbone_name": "mobilenet_v2_fomo",
+        "width_multiplier": 0.35,
+        "cut_point": "block_6_expand_relu",
+        "cut_point_output_channels": 96,
+        "output_stride": 8,
+        "head_channels": 32,
+        "pretrained": False,
+        "initialization": "pytorch_module_defaults",
+        "backbone_parameter_count": 15_840,
+        "head_parameter_count": 3_170,
+        "parameter_count": 19_010,
+        "cut_point_input_channels": 16,
+    }
+    assert summary.model_metadata == expected
+    assert checkpoint["model_metadata"] == expected
+    assert persisted_summary["model_metadata"] == expected
+
+
+def test_training_propagates_epoch_to_train_dataset_and_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The train Dataset receives the current and resumed epoch before loading data."""
+
+    _, run_training, _ = _engine_api()
+    assert callable(run_training)
+    calls: list[int] = []
+    original_set_epoch = YOLOv5FOMODataset.set_epoch
+
+    def recording_set_epoch(dataset: YOLOv5FOMODataset, epoch: int) -> None:
+        calls.append(epoch)
+        original_set_epoch(dataset, epoch)
+
+    monkeypatch.setattr(YOLOv5FOMODataset, "set_epoch", recording_set_epoch)
+    output_dir = tmp_path / "epoch-aware-run"
+    first = load_config(_write_training_config(tmp_path / "first.yaml", output_dir, epochs=1))
+    run_training(first, device_override="cpu")
+    assert calls == [1]
+
+    resumed = load_config(
+        _write_training_config(
+            tmp_path / "resumed.yaml", output_dir, epochs=2, resume=output_dir / "last.pt"
+        )
+    )
+    run_training(resumed, device_override="cpu")
+    assert calls == [1, 2]
+
+
+def test_experiment_run_writes_reproducibility_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An opted-in run writes a config copy, metadata JSON, and one CSV row."""
+
+    _, run_training, _ = _engine_api()
+    assert callable(run_training), "fomo_servo.training.run_training must exist"
+    monkeypatch.setattr(
+        "fomo_servo.training.engine.git_commit_sha", lambda _: "a" * 40
+    )
+    monkeypatch.setattr(
+        "fomo_servo.training.engine.git_worktree_fingerprint",
+        lambda _: (True, "b" * 64),
+    )
+    output_dir = tmp_path / "experiment-output"
+    config_path = _write_training_config(tmp_path / "experiment.yaml", output_dir, epochs=1)
+    with config_path.open("a", encoding="utf-8") as config_file:
+        config_file.write(
+            "\nexperiment:\n"
+            "  name: smoke_experiment\n"
+            f"  summary_csv: \"{(tmp_path / 'experiments_summary.csv').as_posix()}\"\n"
+        )
+
+    config = load_config(config_path)
+    summary = run_training(config, device_override="cpu")
+
+    assert summary.completed_epochs == 1
+    assert "WARNING: Git worktree is dirty" in capsys.readouterr().out
+    assert (output_dir / "config.yaml").read_text(encoding="utf-8") == config_path.read_text(
+        encoding="utf-8"
+    )
+    metadata = json.loads((output_dir / "experiment_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["experiment_name"] == "smoke_experiment"
+    assert metadata["random_seed"] == 123
+    assert metadata["best_epoch"] == 1
+    assert metadata["total_training_time_seconds"] >= 0.0
+    with (tmp_path / "experiments_summary.csv").open("r", newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    assert len(rows) == 1
+    assert rows[0]["experiment_name"] == "smoke_experiment"
+    assert rows[0]["best_threshold"]

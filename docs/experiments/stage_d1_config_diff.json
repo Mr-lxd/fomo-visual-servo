@@ -1,0 +1,65 @@
+{
+  "protocol": "stage_d1_single_backbone_change_v1",
+  "baseline_config": "configs/experiments/loss_ei_object_w100.yaml",
+  "candidate_config": "configs/experiments/stage_d1_fomo_ei_w100.yaml",
+  "allowed_change_paths": [
+    "project.name",
+    "experiment.name",
+    "training.output_dir",
+    "model.backbone"
+  ],
+  "change_count": 4,
+  "changes": [
+    {
+      "path": "project.name",
+      "baseline": "stage_c_loss_ei_object_w100",
+      "candidate": "stage_d1_fomo_ei_w100",
+      "reason": "experiment identity"
+    },
+    {
+      "path": "experiment.name",
+      "baseline": "stage_c_loss_ei_object_w100",
+      "candidate": "stage_d1_fomo_ei_w100",
+      "reason": "experiment identity"
+    },
+    {
+      "path": "training.output_dir",
+      "baseline": "outputs/experiments/stage_c_loss_ei_object_w100",
+      "candidate": "outputs/experiments/stage_d1_fomo_ei_w100",
+      "reason": "isolated output directory"
+    },
+    {
+      "path": "model.backbone",
+      "baseline": "mobilenet_v2_lite",
+      "candidate": "mobilenet_v2_fomo",
+      "reason": "D1 independent variable"
+    }
+  ],
+  "all_other_fields_equal": true,
+  "training_variables_locked": [
+    "dataset.root",
+    "dataset.train_split",
+    "dataset.validation_split",
+    "dataset.classes",
+    "dataset.class_mode",
+    "dataset.collision_policy",
+    "model.width_multiplier",
+    "model.head_channels",
+    "model.input_size",
+    "model.output_stride",
+    "augmentation",
+    "loss",
+    "postprocess",
+    "evaluation",
+    "training.device",
+    "training.amp",
+    "training.num_workers",
+    "training.pin_memory",
+    "training.batch_size",
+    "training.epochs",
+    "training.seed",
+    "training.optimizer",
+    "training.scheduler",
+    "export"
+  ]
+}

@@ -1,0 +1,107 @@
+project:
+  name: stage_d2_fomo_ei_w100_pretrained
+
+dataset:
+  root: "${FOMO_DATASET_ROOT}"
+  train_split: train
+  validation_split: val
+  classes:
+    - fish
+    - jellyfish
+    - penguin
+    - puffin
+    - shark
+    - starfish
+    - stingray
+  class_mode: preserve
+  collision_policy: keep_first
+
+postprocess:
+  inference_threshold: 0.5
+  class_thresholds: null
+  component_mode: connected_components
+  confidence_mode: max
+  selection_strategy: highest_confidence
+  max_match_distance_pixels: 32.0
+  max_lost_frames: 5
+  allowed_class_ids: null
+
+evaluation:
+  matching_mode: centroid_in_bbox
+  max_distance_pixels: 32.0
+  checkpoint_threshold: 0.5
+  threshold_sweep:
+    enabled: true
+    minimum: 0.05
+    maximum: 0.95
+    step: 0.05
+  checkpoint_selection:
+    metric: centroid_pr_auc_macro
+    split: val
+    threshold_grid:
+      minimum: 0.05
+      maximum: 0.95
+      step: 0.05
+  threshold_calibration:
+    enabled: false
+    split: calibration
+    objective: centroid_f1
+    fallback_threshold: 0.5
+    allow_selection_split: false
+
+model:
+  backbone: mobilenet_v2_fomo
+  width_multiplier: 0.35
+  head_channels: 32
+  input_size: 192
+  output_stride: 8
+  pretrained: true
+  pretrained_source: "${FOMO_PRETRAINED_WEIGHTS}"
+  pretrained_sha256: a94030b8c5e6811c60b93c8b6888d2f309dc112008bd14f0963e8c5473201c2c
+
+augmentation:
+  enabled: true
+  preset: underwater_conservative
+  overrides: {}
+
+loss:
+  type: ei_weighted_xent_legacy
+  gamma: 0.0
+  background_weight: 1.0
+  object_weight: 100.0
+
+training:
+  device: auto
+  amp: true
+  amp_initial_scale: 256.0
+  num_workers: 4
+  pin_memory: true
+  batch_size: 8
+  epochs: 60
+  seed: 42
+  output_dir: outputs/experiments/stage_d2_fomo_ei_w100_pretrained
+  resume: null
+  early_stopping_patience: 0
+  early_stopping_min_delta: 0.0
+  checkpoint_criterion: centroid_f1
+  epoch_snapshots:
+    enabled: true
+    format: weights_only
+    interval: 1
+    keep_last: null
+  optimizer:
+    name: adamw
+    learning_rate: 0.001
+    weight_decay: 0.0001
+  scheduler:
+    name: step_lr
+    step_size: 20
+    gamma: 0.5
+
+export:
+  onnx_opset: 17
+  input_size: 192
+
+experiment:
+  name: stage_d2_fomo_ei_w100_pretrained
+  summary_csv: outputs/experiments/experiments_summary.csv

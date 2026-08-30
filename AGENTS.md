@@ -2,11 +2,11 @@
 
 ## 项目状态与目标
 
-本仓库当前处于**设计阶段**。除非任务明确要求，不要创建模型、训练、数据加载、评估、推理或部署实现代码，也不要生成占位式脚手架。
+本项目名为 `fomo-visual-servo`，Python 包名为 `fomo_servo`。仓库当前已经建立可长期回退的 **D2 MobileNetV2-FOMO 稳定工程基线**：完成模型选择、validation/locked evaluation、正式 ONNX 导出、PyTorch/ONNX Runtime parity，以及 Raspberry Pi 4 ARM64 上的静态图片、预录视频、USB UVC 摄像头和 VNC preview 验证。
 
-项目将建设为一个可修改、可训练、可导出，并最终能部署到 Raspberry Pi 5 的 PyTorch FOMO（Faster Objects, More Objects）项目，用于轻量化水下目标视觉伺服。
+该基线不是最终论文代码或项目终点。后续仍包括机器人硬件控制闭环、baseline 方法创新、模型对比与消融、实验室/真实环境测试、投稿版本冻结，以及最终代码与数据集开源。稳定 `main` 用于可复现基线；未成熟科研探索应优先位于 `experiment/*` 或明确的 feature branch，不得为了保留实验而污染正式 D2/Pi runtime 依赖。
 
-开发主机为 Windows 笔记本；Python 版本使用 3.10 或 3.11；训练框架为 PyTorch。实现必须同时兼容 CPU 与 CUDA，但不得依赖 CUDA 专用算子。最终部署目标为 Raspberry Pi 5 上的 ONNX Runtime CPU 推理。
+Windows 训练/导出环境使用 Python 3.10 和 PyTorch；训练实现必须同时兼容 CPU 与 CUDA，但不得依赖 CUDA 专用算子。已验证部署环境为 Raspberry Pi 4 ARM64 / Python 3.13 / ONNX Runtime CPU，且最小运行 bundle 不依赖 torch、torchvision、训练代码、数据集或 checkpoint。Raspberry Pi 5 和其他硬件平台属于后续可验证目标，不能用推测结果替代实测。
 
 ## 设计原则
 
@@ -16,21 +16,25 @@
 - 源码中不得写死数据集的绝对路径、用户目录或机器相关路径。路径只能来自 YAML 配置、命令行参数或受控环境变量。
 - 所有可调参数必须位于 YAML 配置中；源码只负责读取、校验和使用配置。
 - 任何新增模块都必须配套 pytest 测试；测试应与模块在同一任务中提交。
+- 正式 D2 candidate 固定为 seed42 epoch40、validation threshold `0.40`；除非开启经过批准的新模型 milestone，不得重新训练、利用 test split 重选模型/epoch/threshold，或改变已冻结的 preprocessing/postprocessing 与 ONNX contract。
 
-## 预期目录布局
+## 当前目录布局
 
-采用 `src` layout。后续实现应以如下职责边界组织，而非把功能堆入单一脚本：
+采用 `src` layout。后续实现应维持如下职责边界，而非把功能堆入单一脚本：
 
 ```text
 src/
-  fomo_visual_servo/
-    config/       # YAML 加载、schema 与配置校验
-    data/         # YOLOv5 数据集、letterbox、标签/热力图生成
+  fomo_servo/
+    config.py     # YAML 加载、schema 与配置校验
+    datasets/     # YOLOv5 数据集、augmentation、letterbox、标签/热力图生成
     models/       # backbone、FOMO head、模型工厂
+    losses/       # 分类与加权损失
     training/     # 训练循环、损失、优化器、checkpoint、调度器
-    evaluation/   # 指标与验证流程
-    inference/    # 预处理、后处理、可视化无关的预测接口
-    deployment/   # 固定尺寸 ONNX 导出与 ONNX Runtime 校验
+    evaluation/   # validation、locked evaluation 与 parity 流程
+    metrics/      # 分类、质心与序列指标
+    postprocess/  # softmax、connected components 与 detections
+    inference/    # 共享预处理、PyTorch/ORT predictor 与视频缓冲
+    deployment/   # 固定尺寸 ONNX 导出、provenance 与校验
     geometry/     # 坐标、letterbox 与 stride 映射
 tests/
   ...             # 与 src 模块对应的 pytest 测试
@@ -40,7 +44,7 @@ configs/
 
 模型、数据、训练、评估、推理、部署和几何变换必须保持分离。模块之间应使用明确的数据结构和张量约定交互，而不是依赖隐式全局状态。
 
-## 第一阶段功能边界
+## 稳定 D2 基线合同
 
 ### 数据与类别
 
@@ -76,13 +80,14 @@ configs/
 - 测试 round-trip 误差，并显式设置可接受容差；对 stride=8 网格映射的量化误差单独断言。
 - 标签生成、热力图网格中心、后处理质心与原图坐标之间必须有端到端测试。
 
-## ONNX 与 Raspberry Pi 5 约束
+## ONNX 与 Raspberry Pi 部署约束
 
 - 网络优先使用 ONNX Runtime CPU 友好的常见算子：`Conv2d`、`DepthwiseConv2d`、`BatchNorm2d`、`ReLU6`、普通/自适应 pooling 和 `1x1 Conv`。
 - 禁止自定义 C++/CUDA op，避免仅在 CUDA 下可用的实现与未验证的导出路径。
 - 每个可部署模型必须支持固定输入尺寸的 ONNX 导出；导出的输入 shape、输出 shape、opset 和配置来源必须被记录。
 - 必须使用相同的固定样本比较 PyTorch 与 ONNX Runtime 输出，并以数值容差断言一致性；至少验证 logits/概率热力图，必要时也验证后处理结果。
-- Raspberry Pi 5 的实际部署优化应优先考虑 batch=1、固定输入尺寸、CPU 延迟、内存占用和稳定性，而不是依赖 GPU 特性。
+- Raspberry Pi 部署优化应优先考虑 batch=1、固定输入尺寸、CPU 延迟、内存占用和稳定性，而不是依赖 GPU 特性；任何新硬件平台的性能结论都必须来自该平台实测。
+- Headless 与 VNC preview 必须保持可选依赖边界；正式 headless runtime 不得无条件依赖桌面 GUI、PyTorch、torchvision、训练模块或科研对比模型。
 
 ## 测试与质量门槛
 

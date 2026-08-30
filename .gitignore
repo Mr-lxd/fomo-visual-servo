@@ -29,17 +29,24 @@ dist/
 *.pt
 *.pth
 *.ckpt
+*.h5
+*.hdf5
+*.zip
 *.onnx
 *.ort
 *.engine
 *.tflite
 *.log
+/cache/
+/inference_cache/
 
 # Local datasets and exported media
 /data/
 /datasets/
 /predictions/
 /benchmarks/
+/smoke_media/
+/camera_runs/
 
 # Notebook and OS files
 .ipynb_checkpoints/

@@ -16,6 +16,21 @@ dataset:
   class_mode: preserve
   collision_policy: keep_first
 
+postprocess:
+  confidence_threshold: 0.05
+  class_thresholds: null
+  component_mode: connected_components
+  confidence_mode: max
+  selection_strategy: highest_confidence
+  max_match_distance_pixels: 32.0
+  max_lost_frames: 5
+  allowed_class_ids: null
+
+evaluation:
+  matching_mode: centroid_in_bbox
+  max_distance_pixels: 32.0
+  threshold_sweep: [0.05, 0.10, 0.20, 0.30, 0.50, 0.70, 0.90, 0.95]
+
 model:
   backbone: mobilenet_v2_lite
   width_multiplier: 0.35
@@ -49,6 +64,7 @@ training:
   resume: null
   early_stopping_patience: 15
   early_stopping_min_delta: 0.0
+  checkpoint_criterion: grid_f1
   optimizer:
     name: adamw
     learning_rate: 0.001

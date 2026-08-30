@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Sequence, Tuple
 
 import numpy as np
 import torch
@@ -23,6 +23,9 @@ class FOMOBatch:
 
     images: Tensor
     targets: Tensor
+    transforms: Tuple[object, ...]
+    original_boxes: Tuple[Tuple[object, ...], ...]
+    augmentation_metadata: Tuple[object, ...] = ()
 
 
 def collate_fomo_samples(samples: Sequence[FOMOSample]) -> FOMOBatch:
@@ -46,4 +49,7 @@ def collate_fomo_samples(samples: Sequence[FOMOSample]) -> FOMOBatch:
     return FOMOBatch(
         images=torch.from_numpy(np.ascontiguousarray(images)),
         targets=torch.from_numpy(np.ascontiguousarray(targets)),
+        transforms=tuple(sample.transform for sample in samples),
+        original_boxes=tuple(sample.original_boxes for sample in samples),
+        augmentation_metadata=tuple(sample.augmentation_metadata for sample in samples),
     )
