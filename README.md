@@ -150,6 +150,9 @@ run_id="$(date +%Y%m%d-%H%M%S)"
 
 上述正式命令不传 `--confidence-threshold`，因此使用 sidecar 锁定的 `0.40`。摄像头拍摄显示器时出现的 false positive 属于明显 domain shift，只能用于 pipeline/资源释放回归，不能作为模型精度评价。完整 provenance、跨平台 parity 和 Pi benchmark 见 [Raspberry Pi 4 deployment handoff](docs/handoffs/2026-08-28-raspberry-pi4-deployment-handoff.md)。
 
+完全离线的实验室水池原始数据采集（无 inference、clean raw video、HDMI
+键盘操作）见 [Lab Pool Dataset Capture Tool](docs/capture_lab_pool.md)。
+
 ## 环境检查
 
 `scripts/check_env.py` 只检查**当前已激活**的 Python 环境，不创建 conda 环境、不安装依赖，也不修改系统环境。

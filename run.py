@@ -11,7 +11,7 @@ Usage::
 
     python run.py <entry> [arguments...]
 
-Entries: predict_image, predict_video.
+Entries: predict_image, predict_video, capture_dataset.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from pathlib import Path
 ENTRY_POINTS = {
     "predict_image": "scripts.predict_image",
     "predict_video": "scripts.predict_video",
+    "capture_dataset": "scripts.capture_dataset",
 }
 
 USAGE = (
