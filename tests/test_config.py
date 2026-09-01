@@ -163,6 +163,112 @@ model:
     assert config.evaluation.threshold_calibration.fallback_threshold == pytest.approx(0.5)
 
 
+def test_load_config_accepts_explicit_train_only_protocol(tmp_path: Path) -> None:
+    _, load_config = _config_api()
+    config_path = tmp_path / "train_only.yaml"
+    config_path.write_text(
+        """
+dataset:
+  root: data/lab_pool
+  validation_split: null
+  classes: [fish, jellyfish]
+model:
+  input_size: 192
+  output_stride: 8
+training:
+  checkpoint_policy: fixed_final_epoch
+  early_stopping_patience: 0
+evaluation:
+  threshold_sweep:
+    enabled: false
+  threshold_calibration:
+    enabled: false
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.dataset.validation_split is None
+    assert config.training.checkpoint_policy == "fixed_final_epoch"
+    assert config.evaluation.threshold_sweep_enabled is False
+
+
+def test_load_config_reads_strict_weights_initialization(tmp_path: Path) -> None:
+    _, load_config = _config_api()
+    config_path = tmp_path / "initialize.yaml"
+    config_path.write_text(
+        """
+dataset:
+  root: data/lab_pool
+  classes: [fish]
+model:
+  input_size: 96
+  output_stride: 8
+training:
+  initialize_from: weights/epoch_040_weights.pt
+  initialize_sha256: e8c242f4af2b87b70fea2a516352f28e70bf438161eeb7d092231ed46c976a1d
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.training.initialize_from == Path("weights/epoch_040_weights.pt")
+    assert config.training.initialize_sha256 == (
+        "e8c242f4af2b87b70fea2a516352f28e70bf438161eeb7d092231ed46c976a1d"
+    )
+
+
+@pytest.mark.parametrize(
+    ("training_yaml", "message"),
+    [
+        (
+            "initialize_from: weights/init.pt\n  initialize_sha256: not-a-sha",
+            "training.initialize_sha256",
+        ),
+        (
+            "initialize_from: weights/init.pt\n  initialize_sha256: " + "a" * 64 + "\n  resume: outputs/last.pt",
+            "mutually exclusive",
+        ),
+        (
+            "checkpoint_policy: validation_best\n  early_stopping_patience: 0",
+            "fixed_final_epoch",
+        ),
+        (
+            "checkpoint_policy: fixed_final_epoch\n  early_stopping_patience: 2",
+            "early stopping",
+        ),
+    ],
+)
+def test_load_config_rejects_invalid_train_only_or_initialization_protocol(
+    tmp_path: Path, training_yaml: str, message: str
+) -> None:
+    configuration_error, load_config = _config_api()
+    validation = "null" if "checkpoint_policy" in training_yaml else "val"
+    config_path = tmp_path / "invalid_protocol.yaml"
+    config_path.write_text(
+        """
+dataset:
+  root: data/lab_pool
+  validation_split: {validation}
+  classes: [fish]
+model:
+  input_size: 96
+  output_stride: 8
+training:
+  {training_yaml}
+evaluation:
+  threshold_sweep:
+    enabled: false
+""".format(validation=validation, training_yaml=training_yaml).lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(configuration_error, match=message):
+        load_config(config_path)
+
+
 @pytest.mark.parametrize(
     ("yaml_fragment", "message"),
     [
@@ -293,6 +399,64 @@ def test_aug00_none_config_is_fixed_no_augmentation_baseline(
     assert config.postprocess.inference_threshold == pytest.approx(0.5)
     assert config.evaluation.checkpoint_threshold == pytest.approx(0.5)
     assert config.evaluation.threshold_sweep_enabled is True
+
+
+def test_lab_pool_engineering_config_locks_approved_protocol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, load_config = _config_api()
+    dataset_root = tmp_path / "lab_pool_v1_d2_trainonly"
+    checkpoint = tmp_path / "epoch_040_weights.pt"
+    monkeypatch.setenv("FOMO_LAB_POOL_TRAIN_ROOT", str(dataset_root))
+    monkeypatch.setenv("FOMO_D2_EPOCH40_WEIGHTS", str(checkpoint))
+    root = Path(__file__).resolve().parents[1]
+
+    config = load_config(
+        root / "configs/engineering/lab_pool_adaptation_seed42_e20.yaml"
+    )
+
+    assert config.dataset.root == dataset_root
+    assert config.dataset.validation_split is None
+    assert config.dataset.class_names == (
+        "fish",
+        "jellyfish",
+        "penguin",
+        "puffin",
+        "shark",
+        "starfish",
+        "stingray",
+    )
+    assert config.dataset.class_mode == "preserve"
+    assert config.model.backbone == "mobilenet_v2_fomo"
+    assert config.model.width_multiplier == pytest.approx(0.35)
+    assert config.model.head_channels == 32
+    assert config.model.input_size == 192
+    assert config.model.output_stride == 8
+    assert config.model.pretrained is False
+    assert config.training.initialize_from == checkpoint
+    assert config.training.initialize_sha256 == (
+        "e8c242f4af2b87b70fea2a516352f28e70bf438161eeb7d092231ed46c976a1d"
+    )
+    assert config.training.checkpoint_policy == "fixed_final_epoch"
+    assert config.training.batch_size == 8
+    assert config.training.epochs == 20
+    assert config.training.seed == 42
+    assert config.training.early_stopping_patience == 0
+    assert config.training.epoch_snapshots.enabled is True
+    assert config.training.epoch_snapshots.interval == 20
+    assert config.training.epoch_snapshots.keep_last == 1
+    assert config.training.optimizer.name == "adamw"
+    assert config.training.optimizer.learning_rate == pytest.approx(0.0001)
+    assert config.training.optimizer.weight_decay == pytest.approx(0.0001)
+    assert config.training.scheduler.name == "none"
+    assert config.augmentation.preset == "underwater_conservative"
+    assert config.loss.name == "ei_weighted_xent_legacy"
+    assert config.loss.background_weight == pytest.approx(1.0)
+    assert config.loss.object_weight == pytest.approx(100.0)
+    assert config.evaluation.threshold_sweep_enabled is False
+    assert config.evaluation.threshold_calibration.enabled is False
+    assert config.postprocess.inference_threshold == pytest.approx(0.40)
+    assert config.evaluation.checkpoint_threshold == pytest.approx(0.40)
 
 
 def test_aug00_none_locked_config_keeps_the_same_fixed_protocol(

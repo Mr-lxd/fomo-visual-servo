@@ -60,15 +60,20 @@ def main(arguments: Optional[Sequence[str]] = None) -> int:
     print("AMP: {}".format("enabled" if summary.amp_enabled else "disabled"))
     print(f"Start epoch: {summary.start_epoch}")
     print(f"Completed epoch: {summary.completed_epochs}")
-    print(
-        "Best validation {}: {:.6f}".format(
-            summary.best_metric_name, summary.best_val_f1
+    if summary.best_val_f1 is None:
+        print(f"Checkpoint policy: {summary.checkpoint_policy}")
+        print(f"Final train loss: {summary.final_train_loss:.6f}")
+    else:
+        print(
+            "Best validation {}: {:.6f}".format(
+                summary.best_metric_name, summary.best_val_f1
+            )
         )
-    )
     print("Early stopped: {}".format(summary.stopped_early))
     print(f"Output directory: {summary.output_dir}")
     print(f"Last checkpoint: {summary.output_dir / 'last.pt'}")
-    print(f"Best checkpoint: {summary.output_dir / 'best_val_f1.pt'}")
+    if summary.best_val_f1 is not None:
+        print(f"Best checkpoint: {summary.output_dir / 'best_val_f1.pt'}")
     print(f"History: {summary.output_dir / 'history.csv'}")
     if config.experiment.name is not None:
         print(f"Experiment metadata: {summary.output_dir / 'experiment_metadata.json'}")

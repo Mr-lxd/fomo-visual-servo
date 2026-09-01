@@ -66,7 +66,7 @@ def dataset_file_list_hash(dataset_root: Path) -> str:
 
 
 def dataset_content_manifest(
-    dataset_root: Path, train_split: str, validation_split: str
+    dataset_root: Path, train_split: str, validation_split: str | None
 ) -> dict[str, object]:
     """Build a relative-path, size, and content SHA256 manifest for used data files."""
 
@@ -76,7 +76,9 @@ def dataset_content_manifest(
             "dataset root does not exist or is not a directory: {}".format(root)
         )
     relative_paths = {Path("data.yaml")}
-    for split in (train_split, validation_split):
+    for split in tuple(
+        item for item in (train_split, validation_split) if item is not None
+    ):
         if not isinstance(split, str) or not split.strip():
             raise ExperimentMetadataError("dataset split names must be non-empty strings")
         split_names = [split]

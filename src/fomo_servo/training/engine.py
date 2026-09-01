@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import random
 from time import perf_counter
@@ -114,14 +115,14 @@ class TrainingSummary:
 
     start_epoch: int
     completed_epochs: int
-    best_val_f1: float
+    best_val_f1: float | None
     stopped_early: bool
     output_dir: Path
     device: torch.device
     amp_enabled: bool
     best_metric_name: str = "grid_f1"
-    best_grid_f1: float = 0.0
-    best_centroid_f1: float = 0.0
+    best_grid_f1: float | None = 0.0
+    best_centroid_f1: float | None = 0.0
     class_weight_mode: str = "manual"
     class_weights: tuple[float, ...] = ()
     class_statistics: tuple[ClassTrainingStatistics, ...] = ()
@@ -130,26 +131,29 @@ class TrainingSummary:
     background_weight: float = 1.0
     object_weight: float = 1.0
     per_class_weights_applied: bool = True
-    best_epoch: int = 0
-    best_grid_epoch: int = 0
-    best_centroid_epoch: int = 0
+    best_epoch: int | None = 0
+    best_grid_epoch: int | None = 0
+    best_centroid_epoch: int | None = 0
     checkpoint_threshold: float = 0.5
     final_sweep_best_threshold: float | None = None
-    best_val_f1_alias_target: str = "best_grid_f1.pt"
+    best_val_f1_alias_target: Optional[str] = "best_grid_f1.pt"
     total_training_time_seconds: float = 0.0
     augmentation_preset: Optional[str] = None
     resolved_augmentation: dict[str, Any] = field(default_factory=dict)
     augmentation_epoch_stats: tuple[dict[str, Any], ...] = ()
     model_metadata: dict[str, Any] = field(default_factory=dict)
     checkpoint_selection_protocol: str = "v2"
-    legacy_best_fixed_centroid_epoch: int = 0
+    legacy_best_fixed_centroid_epoch: Optional[int] = 0
     best_pr_auc_macro_epoch: Optional[int] = None
     best_sweep_f1_epoch: Optional[int] = None
     checkpoint_selection_metric: str = "centroid_pr_auc_macro"
-    selection_split: str = "validation"
+    selection_split: Optional[str] = "validation"
     calibration_split: Optional[str] = None
     calibrated_threshold: Optional[float] = None
     calibration_is_optimistic: bool = False
+    final_train_loss: float = 0.0
+    checkpoint_policy: str = "validation_best"
+    initialization: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -222,13 +226,13 @@ class _ResumeState:
     """Private restored checkpoint metadata used to continue an existing run."""
 
     start_epoch: int
-    best_val_f1: float
+    best_val_f1: float | None
     early_stopping_bad_epochs: int
-    best_grid_f1: float
-    best_centroid_f1: float
-    best_epoch: int
-    best_grid_epoch: int
-    best_centroid_epoch: int
+    best_grid_f1: float | None
+    best_centroid_f1: float | None
+    best_epoch: int | None
+    best_grid_epoch: int | None
+    best_centroid_epoch: int | None
 
 
 _HISTORY_COLUMNS = (
@@ -297,6 +301,66 @@ def ensure_finite_gradients(model: nn.Module) -> None:
             raise TrainingError("non-finite gradient detected for parameter '{}'".format(name))
 
 
+def initialize_model_weights(
+    model: nn.Module, checkpoint_path: Path | str, expected_sha256: str
+) -> dict[str, Any]:
+    """Strictly load only model weights from a trusted epoch snapshot.
+
+    This operation intentionally does not restore optimizer, scheduler, scaler,
+    RNG, epoch, history, or early-stopping state.
+    """
+
+    source = Path(checkpoint_path)
+    if not source.is_file():
+        raise TrainingError("initialization checkpoint does not exist: {}".format(source))
+    digest = hashlib.sha256()
+    try:
+        with source.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise TrainingError(
+            "unable to hash initialization checkpoint '{}': {}".format(source, error)
+        ) from error
+    actual_sha256 = digest.hexdigest()
+    if actual_sha256 != expected_sha256.lower():
+        raise TrainingError(
+            "initialization checkpoint SHA-256 mismatch: expected {}, got {}".format(
+                expected_sha256.lower(), actual_sha256
+            )
+        )
+    try:
+        payload = torch.load(source, map_location="cpu", weights_only=False)
+    except (OSError, RuntimeError, ValueError, TypeError) as error:
+        raise TrainingError(
+            "unable to load initialization checkpoint '{}': {}".format(source, error)
+        ) from error
+    if not isinstance(payload, Mapping) or not (
+        payload.get("checkpoint_kind") == "epoch_snapshot"
+        and payload.get("weights_only") is True
+        and payload.get("resumable") is False
+        and isinstance(payload.get("model_state"), Mapping)
+    ):
+        raise TrainingError(
+            "initialization checkpoint must be a weights-only epoch snapshot"
+        )
+    try:
+        incompatible = model.load_state_dict(payload["model_state"], strict=True)
+    except RuntimeError as error:
+        raise TrainingError(
+            "initialization checkpoint strict model state load failed: {}".format(error)
+        ) from error
+    return {
+        "path": str(source),
+        "sha256": actual_sha256,
+        "checkpoint_kind": "epoch_snapshot",
+        "source_epoch": payload.get("epoch"),
+        "source_seed": payload.get("seed"),
+        "strict_missing_keys": list(incompatible.missing_keys),
+        "strict_unexpected_keys": list(incompatible.unexpected_keys),
+    }
+
+
 def run_training(
     config: ProjectConfig,
     *,
@@ -334,7 +398,26 @@ def run_training(
     set_random_seed(config.training.seed)
     runtime = create_training_runtime(config.training, device_override)
     model = prepare_model(build_fomo_model(config), runtime)
+    initialization: dict[str, Any] = {}
+    if config.training.initialize_from is not None:
+        if config.training.initialize_sha256 is None:
+            raise TrainingError("training.initialize_sha256 is required")
+        initialization = initialize_model_weights(
+            model,
+            config.training.initialize_from,
+            config.training.initialize_sha256,
+        )
     model_metadata = describe_model(config, model)
+    if initialization:
+        model_metadata = dict(model_metadata)
+        model_metadata.update(
+            {
+                "initialization": "weights_only_checkpoint",
+                "initialization_checkpoint_sha256": initialization["sha256"],
+                "initialization_source_epoch": initialization["source_epoch"],
+                "initialization_source_seed": initialization["source_seed"],
+            }
+        )
     train_loader, validation_loader = _build_data_loaders(config, runtime)
     train_dataset = train_loader.dataset
     if not isinstance(train_dataset, YOLOv5FOMODataset):
@@ -403,15 +486,19 @@ def run_training(
             augmentation_epoch_stats.extend(previous_stats)
     if resume_path is None:
         _initialize_history(history_path, append=False)
+        initial_best: float | None = (
+            None if validation_loader is None else float("-inf")
+        )
+        initial_epoch: int | None = None if validation_loader is None else 0
         resume_state = _ResumeState(
             start_epoch=1,
-            best_val_f1=float("-inf"),
+            best_val_f1=initial_best,
             early_stopping_bad_epochs=0,
-            best_grid_f1=float("-inf"),
-            best_centroid_f1=float("-inf"),
-            best_epoch=0,
-            best_grid_epoch=0,
-            best_centroid_epoch=0,
+            best_grid_f1=initial_best,
+            best_centroid_f1=initial_best,
+            best_epoch=initial_epoch,
+            best_grid_epoch=initial_epoch,
+            best_centroid_epoch=initial_epoch,
         )
     else:
         resume_state = _restore_checkpoint(
@@ -422,6 +509,7 @@ def run_training(
             scaler=scaler,
             device=runtime.device,
             checkpoint_criterion=config.training.checkpoint_criterion,
+            checkpoint_policy=config.training.checkpoint_policy,
         )
         _initialize_history(history_path, append=True)
 
@@ -434,6 +522,7 @@ def run_training(
     bad_epochs = resume_state.early_stopping_bad_epochs
     completed_epochs = resume_state.start_epoch - 1
     stopped_early = False
+    final_train_loss = 0.0
     for epoch in range(resume_state.start_epoch, config.training.epochs + 1):
         train_dataset.set_epoch(epoch)
         train_result = train_one_epoch(
@@ -445,46 +534,55 @@ def run_training(
             runtime=runtime,
         )
         train_loss = train_result.loss
+        final_train_loss = train_loss
         train_augmentation_stats = dict(train_result.augmentation_stats)
         train_augmentation_stats["epoch"] = epoch
         augmentation_epoch_stats.append(train_augmentation_stats)
-        validation = validate_one_epoch(
-            model=model,
-            loader=validation_loader,
-            criterion=criterion,
-            runtime=runtime,
-            class_names=config.dataset.class_names,
-            stride=config.model.output_stride,
-            postprocess_config=config.postprocess,
-            evaluation_config=config.evaluation,
-            checkpoint_threshold=config.evaluation.checkpoint_threshold,
-        )
+        validation: EpochMetrics | None = None
+        if validation_loader is not None:
+            validation = validate_one_epoch(
+                model=model,
+                loader=validation_loader,
+                criterion=criterion,
+                runtime=runtime,
+                class_names=config.dataset.class_names,
+                stride=config.model.output_stride,
+                postprocess_config=config.postprocess,
+                evaluation_config=config.evaluation,
+                checkpoint_threshold=config.evaluation.checkpoint_threshold,
+            )
         learning_rate = float(optimizer.param_groups[0]["lr"])
         if scheduler is not None:
             scheduler.step()
 
-        validation_metric = (
-            validation.grid_f1
-            if config.training.checkpoint_criterion == "grid_f1"
-            else validation.centroid_f1
-        )
-        improved = validation_metric > (
-            best_val_f1 + config.training.early_stopping_min_delta
-        )
-        if improved:
-            best_val_f1 = validation_metric
-            bad_epochs = 0
-            best_epoch = epoch
-        else:
-            bad_epochs += 1
-        grid_improved = validation.grid_f1 > best_grid_f1
-        if grid_improved:
-            best_grid_f1 = validation.grid_f1
-            best_grid_epoch = epoch
-        centroid_improved = validation.centroid_f1 > best_centroid_f1
-        if centroid_improved:
-            best_centroid_f1 = validation.centroid_f1
-            best_centroid_epoch = epoch
+        improved = False
+        grid_improved = False
+        centroid_improved = False
+        if validation is not None:
+            if best_val_f1 is None or best_grid_f1 is None or best_centroid_f1 is None:
+                raise TrainingError("validation checkpoint state is missing")
+            validation_metric = (
+                validation.grid_f1
+                if config.training.checkpoint_criterion == "grid_f1"
+                else validation.centroid_f1
+            )
+            improved = validation_metric > (
+                best_val_f1 + config.training.early_stopping_min_delta
+            )
+            if improved:
+                best_val_f1 = validation_metric
+                bad_epochs = 0
+                best_epoch = epoch
+            else:
+                bad_epochs += 1
+            grid_improved = validation.grid_f1 > best_grid_f1
+            if grid_improved:
+                best_grid_f1 = validation.grid_f1
+                best_grid_epoch = epoch
+            centroid_improved = validation.centroid_f1 > best_centroid_f1
+            if centroid_improved:
+                best_centroid_f1 = validation.centroid_f1
+                best_centroid_epoch = epoch
         checkpoint_arguments = dict(
             model=model,
             optimizer=optimizer,
@@ -503,10 +601,16 @@ def run_training(
             validation=validation,
             selection_threshold=config.evaluation.checkpoint_threshold,
             best_val_f1_alias_target=(
-                "best_grid_f1.pt"
-                if config.training.checkpoint_criterion == "grid_f1"
-                else "best_centroid_f1.pt"
+                None
+                if validation is None
+                else (
+                    "best_grid_f1.pt"
+                    if config.training.checkpoint_criterion == "grid_f1"
+                    else "best_centroid_f1.pt"
+                )
             ),
+            checkpoint_policy=config.training.checkpoint_policy,
+            initialization=initialization,
             augmentation_preset=config.augmentation.preset,
             resolved_augmentation=resolved_augmentation_dict(config.augmentation),
             augmentation_stats=train_augmentation_stats,
@@ -521,7 +625,9 @@ def run_training(
             _checkpoint_payload(
                 **checkpoint_arguments,
                 checkpoint_type="last",
-                selection_metric="last",
+                selection_metric=(
+                    "fixed_final_epoch" if validation is None else "last"
+                ),
             ),
             output_dir / "last.pt",
         )
@@ -599,14 +705,20 @@ def run_training(
     summary = TrainingSummary(
         start_epoch=resume_state.start_epoch,
         completed_epochs=completed_epochs,
-        best_val_f1=max(best_val_f1, 0.0),
+        best_val_f1=(None if best_val_f1 is None else max(best_val_f1, 0.0)),
         stopped_early=stopped_early,
         output_dir=output_dir,
         device=runtime.device,
         amp_enabled=runtime.amp_enabled,
-        best_metric_name=config.training.checkpoint_criterion,
-        best_grid_f1=max(best_grid_f1, 0.0),
-        best_centroid_f1=max(best_centroid_f1, 0.0),
+        best_metric_name=(
+            "fixed_final_epoch"
+            if validation_loader is None
+            else config.training.checkpoint_criterion
+        ),
+        best_grid_f1=(None if best_grid_f1 is None else max(best_grid_f1, 0.0)),
+        best_centroid_f1=(
+            None if best_centroid_f1 is None else max(best_centroid_f1, 0.0)
+        ),
         class_weight_mode=resolved_weights.mode,
         class_weights=resolved_weights.weights,
         class_statistics=resolved_weights.statistics,
@@ -620,9 +732,13 @@ def run_training(
         best_centroid_epoch=best_centroid_epoch,
         checkpoint_threshold=config.evaluation.checkpoint_threshold,
         best_val_f1_alias_target=(
-            "best_grid_f1.pt"
-            if config.training.checkpoint_criterion == "grid_f1"
-            else "best_centroid_f1.pt"
+            None
+            if validation_loader is None
+            else (
+                "best_grid_f1.pt"
+                if config.training.checkpoint_criterion == "grid_f1"
+                else "best_centroid_f1.pt"
+            )
         ),
         total_training_time_seconds=perf_counter() - training_started,
         augmentation_preset=config.augmentation.preset,
@@ -630,8 +746,16 @@ def run_training(
         augmentation_epoch_stats=tuple(augmentation_epoch_stats),
         model_metadata=model_metadata,
         legacy_best_fixed_centroid_epoch=best_centroid_epoch,
-        checkpoint_selection_metric=config.evaluation.checkpoint_selection.metric,
-        selection_split=config.evaluation.checkpoint_selection.split,
+        checkpoint_selection_metric=(
+            "fixed_final_epoch"
+            if validation_loader is None
+            else config.evaluation.checkpoint_selection.metric
+        ),
+        selection_split=(
+            None
+            if validation_loader is None
+            else config.evaluation.checkpoint_selection.split
+        ),
         calibration_split=(
             config.evaluation.threshold_calibration.split
             if config.evaluation.threshold_calibration.enabled
@@ -643,20 +767,32 @@ def run_training(
             == config.evaluation.checkpoint_selection.split
             and config.evaluation.threshold_calibration.allow_selection_split
         ),
+        final_train_loss=final_train_loss,
+        checkpoint_policy=config.training.checkpoint_policy,
+        initialization=initialization,
     )
     if config.experiment.name is not None:
-        final_sweep_best_threshold = _record_experiment(
-            config=config,
-            model=model,
-            device=runtime.device,
-            output_dir=output_dir,
-            summary=summary,
-            git_dirty=git_dirty,
-            git_diff_sha256=git_diff_sha256,
-        )
-        summary = replace(
-            summary, final_sweep_best_threshold=final_sweep_best_threshold
-        )
+        if validation_loader is None:
+            _record_train_only_experiment(
+                config=config,
+                output_dir=output_dir,
+                summary=summary,
+                git_dirty=git_dirty,
+                git_diff_sha256=git_diff_sha256,
+            )
+        else:
+            final_sweep_best_threshold = _record_experiment(
+                config=config,
+                model=model,
+                device=runtime.device,
+                output_dir=output_dir,
+                summary=summary,
+                git_dirty=git_dirty,
+                git_diff_sha256=git_diff_sha256,
+            )
+            summary = replace(
+                summary, final_sweep_best_threshold=final_sweep_best_threshold
+            )
     _write_training_summary(output_dir / "training_summary.json", summary)
     return summary
 
@@ -799,8 +935,8 @@ def build_scheduler(
 
 def _build_data_loaders(
     config: ProjectConfig, runtime: TrainingRuntime
-) -> tuple[DataLoader[FOMOBatch], DataLoader[FOMOBatch]]:
-    """Build deterministic train/validation loaders and validate dataset class semantics."""
+) -> tuple[DataLoader[FOMOBatch], Optional[DataLoader[FOMOBatch]]]:
+    """Build a train loader and an optional validation loader."""
 
     common_arguments = {
         "root": config.dataset.root,
@@ -817,25 +953,26 @@ def _build_data_loaders(
         augmentation=config.augmentation,
         **common_arguments,
     )
-    validation_dataset = YOLOv5FOMODataset(
-        split=config.dataset.validation_split,
-        augmentation=config.augmentation,
-        **common_arguments,
-    )
     if train_dataset.class_names != config.dataset.class_names:
         raise TrainingError(
             "train dataset classes {} do not match YAML classes {}".format(
                 train_dataset.class_names, config.dataset.class_names
             )
         )
-    if validation_dataset.class_names != config.dataset.class_names:
-        raise TrainingError(
-            "validation dataset classes {} do not match YAML classes {}".format(
-                validation_dataset.class_names, config.dataset.class_names
-            )
+    validation_dataset: YOLOv5FOMODataset | None = None
+    if config.dataset.validation_split is not None:
+        validation_dataset = YOLOv5FOMODataset(
+            split=config.dataset.validation_split,
+            augmentation=config.augmentation,
+            **common_arguments,
         )
+        if validation_dataset.class_names != config.dataset.class_names:
+            raise TrainingError(
+                "validation dataset classes {} do not match YAML classes {}".format(
+                    validation_dataset.class_names, config.dataset.class_names
+                )
+            )
     generator = torch.Generator().manual_seed(config.training.seed)
-    validation_generator = torch.Generator().manual_seed(config.training.seed + 1)
     loader_arguments = {
         "batch_size": config.training.batch_size,
         "num_workers": runtime.num_workers,
@@ -844,19 +981,20 @@ def _build_data_loaders(
         "worker_init_fn": _seed_data_loader_worker,
         "persistent_workers": False,
     }
-    return (
-        DataLoader(
-            train_dataset,
-            shuffle=True,
-            generator=generator,
-            **loader_arguments,
-        ),
-        DataLoader(
-            validation_dataset,
-            shuffle=False,
-            generator=validation_generator,
-            **loader_arguments,
-        ),
+    train_loader = DataLoader(
+        train_dataset,
+        shuffle=True,
+        generator=generator,
+        **loader_arguments,
+    )
+    if validation_dataset is None:
+        return train_loader, None
+    validation_generator = torch.Generator().manual_seed(config.training.seed + 1)
+    return train_loader, DataLoader(
+        validation_dataset,
+        shuffle=False,
+        generator=validation_generator,
+        **loader_arguments,
     )
 
 
@@ -914,6 +1052,67 @@ def _print_class_weight_summary(resolved_weights: ResolvedClassWeights) -> None:
                 item.different_class_collision_count,
             )
         )
+
+
+def _record_train_only_experiment(
+    *,
+    config: ProjectConfig,
+    output_dir: Path,
+    summary: TrainingSummary,
+    git_dirty: bool,
+    git_diff_sha256: str,
+) -> None:
+    """Persist train-only provenance without running validation or metric selection."""
+
+    if config.experiment.name is None:
+        raise TrainingError("experiment name is required for experiment recording")
+    try:
+        config_copy = copy_experiment_config(config.source_path, output_dir)
+        git_sha = git_commit_sha(config.source_path.parent)
+        file_hash = dataset_file_list_hash(config.dataset.root)
+        content_manifest = dataset_content_manifest(
+            config.dataset.root,
+            config.dataset.train_split,
+            config.dataset.validation_split,
+        )
+        write_dataset_manifest(output_dir, content_manifest)
+        write_experiment_metadata(
+            output_dir,
+            {
+                "experiment_name": config.experiment.name,
+                "output_dir": str(output_dir),
+                "config_copy": str(config_copy),
+                "git_commit_sha": git_sha,
+                "git_dirty": git_dirty,
+                "git_diff_sha256": git_diff_sha256,
+                "dataset_file_list_hash": file_hash,
+                "dataset_content_hash": content_manifest["dataset_content_hash"],
+                "validation_split": None,
+                "random_seed": config.training.seed,
+                "completed_epochs": summary.completed_epochs,
+                "final_train_loss": summary.final_train_loss,
+                "checkpoint_policy": summary.checkpoint_policy,
+                "selected_checkpoint": "epoch_{:03d}_weights.pt".format(
+                    summary.completed_epochs
+                ),
+                "checkpoint_threshold": config.evaluation.checkpoint_threshold,
+                "initialization": summary.initialization,
+                "augmentation_preset": config.augmentation.preset,
+                "resolved_augmentation": resolved_augmentation_dict(
+                    config.augmentation
+                ),
+                "model_metadata": summary.model_metadata,
+                "total_training_time_seconds": summary.total_training_time_seconds,
+            },
+        )
+    except ExperimentMetadataError as error:
+        raise TrainingError(
+            "unable to record train-only experiment metadata: {}".format(error)
+        ) from error
+    except (OSError, RuntimeError, ValueError, TypeError) as error:
+        raise TrainingError(
+            "unable to finalize train-only experiment record: {}".format(error)
+        ) from error
 
 
 def _record_experiment(
@@ -1084,6 +1283,9 @@ def _write_training_summary(summary_path: Path, summary: TrainingSummary) -> Non
         "calibration_split": summary.calibration_split,
         "calibrated_threshold": summary.calibrated_threshold,
         "calibration_is_optimistic": summary.calibration_is_optimistic,
+        "final_train_loss": summary.final_train_loss,
+        "checkpoint_policy": summary.checkpoint_policy,
+        "initialization": summary.initialization,
     }
     try:
         summary_path.write_text(
@@ -1130,11 +1332,62 @@ def _append_history(
     *,
     epoch: int,
     train_loss: float,
-    validation: EpochMetrics,
+    validation: Optional[EpochMetrics],
     learning_rate: float,
     augmentation_stats: Mapping[str, Any],
 ) -> None:
-    """Append one train/validation metrics row to a configured history CSV."""
+    """Append one train row with optional validation metrics."""
+
+    validation_values: dict[str, Any]
+    if validation is None:
+        validation_values = {
+            name: None
+            for name in (
+                "val_loss",
+                "grid_precision",
+                "grid_recall",
+                "grid_f1",
+                "centroid_precision",
+                "centroid_recall",
+                "centroid_f1",
+                "mean_localization_error_pixels",
+                "median_localization_error_pixels",
+                "mean_count_bias",
+                "mean_absolute_count_error",
+                "count_error_per_image",
+                "centroid_per_class_f1",
+                "precision",
+                "recall",
+                "f1",
+            )
+        }
+    else:
+        validation_values = {
+            "val_loss": validation.loss,
+            "grid_precision": validation.grid_precision,
+            "grid_recall": validation.grid_recall,
+            "grid_f1": validation.grid_f1,
+            "centroid_precision": validation.centroid_precision,
+            "centroid_recall": validation.centroid_recall,
+            "centroid_f1": validation.centroid_f1,
+            "mean_localization_error_pixels": validation.mean_localization_error_pixels,
+            "median_localization_error_pixels": validation.median_localization_error_pixels,
+            "mean_count_bias": validation.mean_count_bias,
+            "mean_absolute_count_error": validation.mean_absolute_count_error,
+            "count_error_per_image": json.dumps(validation.count_error_per_image),
+            "centroid_per_class_f1": json.dumps(
+                {
+                    name: values.get("f1", 0.0)
+                    for name, values in (
+                        validation.per_class_precision_recall_f1 or {}
+                    ).items()
+                },
+                sort_keys=True,
+            ),
+            "precision": validation.grid_precision,
+            "recall": validation.grid_recall,
+            "f1": validation.grid_f1,
+        }
 
     with history_path.open("a", newline="", encoding="utf-8") as history_file:
         writer = csv.DictWriter(history_file, fieldnames=_HISTORY_COLUMNS)
@@ -1142,28 +1395,7 @@ def _append_history(
             {
                 "epoch": epoch,
                 "train_loss": train_loss,
-                "val_loss": validation.loss,
-                "grid_precision": validation.grid_precision,
-                "grid_recall": validation.grid_recall,
-                "grid_f1": validation.grid_f1,
-                "centroid_precision": validation.centroid_precision,
-                "centroid_recall": validation.centroid_recall,
-                "centroid_f1": validation.centroid_f1,
-                "mean_localization_error_pixels": validation.mean_localization_error_pixels,
-                "median_localization_error_pixels": validation.median_localization_error_pixels,
-                "mean_count_bias": validation.mean_count_bias,
-                "mean_absolute_count_error": validation.mean_absolute_count_error,
-                "count_error_per_image": json.dumps(validation.count_error_per_image),
-                "centroid_per_class_f1": json.dumps(
-                    {
-                        name: values.get("f1", 0.0)
-                        for name, values in (validation.per_class_precision_recall_f1 or {}).items()
-                    },
-                    sort_keys=True,
-                ),
-                "precision": validation.grid_precision,
-                "recall": validation.grid_recall,
-                "f1": validation.grid_f1,
+                **validation_values,
                 "learning_rate": learning_rate,
                 **{
                     name: augmentation_stats.get(name, 0)
@@ -1182,20 +1414,22 @@ def _checkpoint_payload(
     scheduler: Optional[LRScheduler],
     scaler: torch.amp.GradScaler,
     epoch: int,
-    best_val_f1: float,
-    best_grid_f1: float,
-    best_centroid_f1: float,
-    best_epoch: int,
-    best_grid_epoch: int,
-    best_centroid_epoch: int,
+    best_val_f1: float | None,
+    best_grid_f1: float | None,
+    best_centroid_f1: float | None,
+    best_epoch: int | None,
+    best_grid_epoch: int | None,
+    best_centroid_epoch: int | None,
     early_stopping_bad_epochs: int,
     checkpoint_criterion: str,
     resolved_weights: ResolvedClassWeights,
-    validation: EpochMetrics,
+    validation: Optional[EpochMetrics],
     checkpoint_type: str,
     selection_metric: str,
     selection_threshold: float,
-    best_val_f1_alias_target: str,
+    best_val_f1_alias_target: Optional[str],
+    checkpoint_policy: str,
+    initialization: Mapping[str, Any],
     augmentation_preset: Optional[str],
     resolved_augmentation: Mapping[str, Any],
     augmentation_stats: Mapping[str, Any],
@@ -1217,10 +1451,14 @@ def _checkpoint_payload(
         "checkpoint_type": checkpoint_type,
         "selection_metric": selection_metric,
         "selection_threshold": selection_threshold,
-        "grid_f1": validation.grid_f1,
-        "centroid_precision": validation.centroid_precision,
-        "centroid_recall": validation.centroid_recall,
-        "centroid_f1": validation.centroid_f1,
+        "grid_f1": validation.grid_f1 if validation is not None else None,
+        "centroid_precision": (
+            validation.centroid_precision if validation is not None else None
+        ),
+        "centroid_recall": (
+            validation.centroid_recall if validation is not None else None
+        ),
+        "centroid_f1": validation.centroid_f1 if validation is not None else None,
         "best_val_f1_alias_target": best_val_f1_alias_target,
         "best_val_f1": best_val_f1,
         "best_grid_f1": best_grid_f1,
@@ -1229,6 +1467,7 @@ def _checkpoint_payload(
         "best_grid_epoch": best_grid_epoch,
         "best_centroid_epoch": best_centroid_epoch,
         "checkpoint_criterion": checkpoint_criterion,
+        "checkpoint_policy": checkpoint_policy,
         "early_stopping_bad_epochs": early_stopping_bad_epochs,
         "class_weight_mode": resolved_weights.mode,
         "class_weights": list(resolved_weights.weights),
@@ -1243,6 +1482,7 @@ def _checkpoint_payload(
         "resolved_augmentation": dict(resolved_augmentation),
         "augmentation_stats": dict(augmentation_stats),
         "model_metadata": dict(model_metadata),
+        "initialization": dict(initialization),
     }
 
 
@@ -1268,6 +1508,7 @@ def _restore_checkpoint(
     scaler: torch.amp.GradScaler,
     device: torch.device,
     checkpoint_criterion: str,
+    checkpoint_policy: str = "validation_best",
 ) -> _ResumeState:
     """Restore a checkpoint or raise a diagnostic error before any new epoch starts."""
 
@@ -1324,13 +1565,43 @@ def _restore_checkpoint(
     if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
         raise TrainingError("resume checkpoint epoch must be a non-negative integer")
     best_val_f1 = checkpoint["best_val_f1"]
-    if not isinstance(best_val_f1, (int, float)):
-        raise TrainingError("resume checkpoint best_val_f1 must be numeric")
     bad_epochs = checkpoint["early_stopping_bad_epochs"]
     if isinstance(bad_epochs, bool) or not isinstance(bad_epochs, int) or bad_epochs < 0:
         raise TrainingError(
             "resume checkpoint early_stopping_bad_epochs must be non-negative"
         )
+    saved_policy = checkpoint.get("checkpoint_policy", "validation_best")
+    if saved_policy != checkpoint_policy:
+        raise TrainingError(
+            "resume checkpoint policy '{}' does not match configured '{}'".format(
+                saved_policy, checkpoint_policy
+            )
+        )
+    if saved_policy == "fixed_final_epoch":
+        metric_fields = (
+            checkpoint.get("best_val_f1"),
+            checkpoint.get("best_grid_f1"),
+            checkpoint.get("best_centroid_f1"),
+            checkpoint.get("best_epoch"),
+            checkpoint.get("best_grid_epoch"),
+            checkpoint.get("best_centroid_epoch"),
+        )
+        if any(value is not None for value in metric_fields):
+            raise TrainingError(
+                "train-only resume checkpoint must not contain best validation metrics"
+            )
+        return _ResumeState(
+            start_epoch=epoch + 1,
+            best_val_f1=None,
+            early_stopping_bad_epochs=bad_epochs,
+            best_grid_f1=None,
+            best_centroid_f1=None,
+            best_epoch=None,
+            best_grid_epoch=None,
+            best_centroid_epoch=None,
+        )
+    if not isinstance(best_val_f1, (int, float)):
+        raise TrainingError("resume checkpoint best_val_f1 must be numeric")
     saved_criterion = checkpoint.get("checkpoint_criterion", checkpoint_criterion)
     if saved_criterion not in {"grid_f1", "centroid_f1"}:
         raise TrainingError("resume checkpoint criterion is invalid")
