@@ -70,7 +70,10 @@ class OnnxExportContract:
     class_names: tuple[str, ...]
     pretrained: bool
     initialization: str
-    pretrained_sha256: str
+    pretrained_sha256: str | None
+    initialization_checkpoint_sha256: str | None
+    initialization_source_epoch: int | None
+    initialization_source_seed: int | None
     input_name: str
     input_shape: tuple[int, int, int, int]
     input_dtype: str
@@ -164,8 +167,32 @@ def load_export_contract(path: Path) -> OnnxExportContract:
     if cut_point != "block_6_expand_relu":
         raise OnnxExportError("model.cut_point must be 'block_6_expand_relu'")
     pretrained = _boolean(model.get("pretrained"), "model.pretrained")
-    if not pretrained:
-        raise OnnxExportError("model.pretrained must be true for the formal D2 checkpoint")
+    initialization = _text(model.get("initialization"), "model.initialization")
+    if pretrained:
+        pretrained_sha256: str | None = _sha256(
+            model.get("pretrained_sha256"), "model.pretrained_sha256"
+        )
+        initialization_checkpoint_sha256: str | None = None
+        initialization_source_epoch: int | None = None
+        initialization_source_seed: int | None = None
+    else:
+        if initialization != "weights_only_checkpoint":
+            raise OnnxExportError(
+                "model.pretrained=false requires initialization='weights_only_checkpoint'"
+            )
+        pretrained_sha256 = None
+        initialization_checkpoint_sha256 = _sha256(
+            model.get("initialization_checkpoint_sha256"),
+            "model.initialization_checkpoint_sha256",
+        )
+        initialization_source_epoch = _positive_int(
+            model.get("initialization_source_epoch"),
+            "model.initialization_source_epoch",
+        )
+        initialization_source_seed = _nonnegative_int(
+            model.get("initialization_source_seed"),
+            "model.initialization_source_seed",
+        )
     opset = _positive_int(onnx_config.get("opset"), "onnx.opset")
     if opset != 17:
         raise OnnxExportError("onnx.opset must be 17 for the locked deployment contract")
@@ -244,10 +271,11 @@ def load_export_contract(path: Path) -> OnnxExportContract:
         output_stride=output_stride,
         class_names=class_names,
         pretrained=pretrained,
-        initialization=_text(model.get("initialization"), "model.initialization"),
-        pretrained_sha256=_sha256(
-            model.get("pretrained_sha256"), "model.pretrained_sha256"
-        ),
+        initialization=initialization,
+        pretrained_sha256=pretrained_sha256,
+        initialization_checkpoint_sha256=initialization_checkpoint_sha256,
+        initialization_source_epoch=initialization_source_epoch,
+        initialization_source_seed=initialization_source_seed,
         input_name=_text(input_config.get("name"), "input.name"),
         input_shape=input_shape,
         input_dtype=input_dtype,
@@ -330,17 +358,31 @@ def load_checkpoint_model(
         for key, expected in expected_metadata.items()
         if metadata.get(key) != expected
     }
-    load_report = metadata.get("pretrained_load_report")
-    if not isinstance(load_report, Mapping):
-        mismatches["pretrained_load_report"] = {
-            "expected": "mapping",
-            "actual": type(load_report).__name__,
+    if contract.pretrained:
+        load_report = metadata.get("pretrained_load_report")
+        if not isinstance(load_report, Mapping):
+            mismatches["pretrained_load_report"] = {
+                "expected": "mapping",
+                "actual": type(load_report).__name__,
+            }
+        elif load_report.get("sha256") != contract.pretrained_sha256:
+            mismatches["pretrained_load_report.sha256"] = {
+                "expected": contract.pretrained_sha256,
+                "actual": load_report.get("sha256"),
+            }
+    else:
+        expected_initialization = {
+            "initialization_checkpoint_sha256": contract.initialization_checkpoint_sha256,
+            "initialization_source_epoch": contract.initialization_source_epoch,
+            "initialization_source_seed": contract.initialization_source_seed,
         }
-    elif load_report.get("sha256") != contract.pretrained_sha256:
-        mismatches["pretrained_load_report.sha256"] = {
-            "expected": contract.pretrained_sha256,
-            "actual": load_report.get("sha256"),
-        }
+        mismatches.update(
+            {
+                key: {"expected": expected, "actual": metadata.get(key)}
+                for key, expected in expected_initialization.items()
+                if metadata.get(key) != expected
+            }
+        )
     if mismatches:
         raise OnnxExportError(
             "checkpoint model metadata mismatch: {}".format(
@@ -379,6 +421,13 @@ def load_checkpoint_model(
         "seed": payload["seed"],
         "parameter_count": payload["parameter_count"],
         "config_fingerprint": payload["config_fingerprint"],
+        "pretrained": contract.pretrained,
+        "initialization": contract.initialization,
+        "initialization_checkpoint_sha256": (
+            contract.initialization_checkpoint_sha256
+        ),
+        "initialization_source_epoch": contract.initialization_source_epoch,
+        "initialization_source_seed": contract.initialization_source_seed,
     }
 
 
@@ -711,6 +760,11 @@ def _validate_source_experiment(contract: OnnxExportContract) -> None:
             else None,
         ),
     }
+    if not contract.pretrained:
+        expected_values["training.initialize_sha256"] = (
+            training.get("initialize_sha256"),
+            contract.initialization_checkpoint_sha256,
+        )
     mismatches = {
         name: {"source": actual, "export_contract": expected}
         for name, (actual, expected) in expected_values.items()

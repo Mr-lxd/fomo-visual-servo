@@ -109,3 +109,63 @@ class LatestFrameReader:
             self.error = error
         finally:
             self.finished.set()
+
+
+class SequentialFrameReader:
+    """Decode an offline video synchronously without dropping source frames.
+
+    The reader exposes the same ``buffer.get``/``finished``/``error`` surface as
+    :class:`LatestFrameReader`, but ``get`` performs exactly one OpenCV decode.
+    It is intended for reproducible offline validation, not live cameras.
+    """
+
+    def __init__(self, capture: cv2.VideoCapture) -> None:
+        self.capture = capture
+        self.buffer = self
+        self.finished = threading.Event()
+        self.error: Optional[Exception] = None
+        self.decoded_frame_count = 0
+
+    def start(self) -> "SequentialFrameReader":
+        """Return this synchronous reader without starting a worker thread."""
+
+        return self
+
+    def stop(self) -> None:
+        """Mark the reader finished and release the capture resource."""
+
+        self.finished.set()
+        self.capture.release()
+
+    def get(self, timeout: float = 1.0) -> Optional[FramePacket]:
+        """Decode and return the next frame; ``timeout`` is API compatibility only."""
+
+        del timeout
+        if self.finished.is_set():
+            return None
+        try:
+            success, frame = self.capture.read()
+            if not success:
+                expected_frames = int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT))
+                if expected_frames > 0 and self.decoded_frame_count < expected_frames:
+                    self.error = RuntimeError(
+                        "video decode stopped after {} frames; expected {}".format(
+                            self.decoded_frame_count, expected_frames
+                        )
+                    )
+                self.finished.set()
+                return None
+            frame_index = self.decoded_frame_count
+            timestamp_ms = float(self.capture.get(cv2.CAP_PROP_POS_MSEC))
+            expected_frames = int(self.capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            timestamp = (
+                max(timestamp_ms, 0.0) / 1000.0
+                if expected_frames > 0
+                else time.time()
+            )
+            self.decoded_frame_count += 1
+            return FramePacket(frame_index, timestamp, frame)
+        except Exception as error:
+            self.error = error
+            self.finished.set()
+            return None

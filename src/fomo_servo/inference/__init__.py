@@ -13,7 +13,7 @@ from .preprocessing import (
     prediction_from_numpy_logits,
     preprocess_rgb_image,
 )
-from .video import FramePacket, LatestFrameBuffer, LatestFrameReader
+from .video import FramePacket, LatestFrameBuffer, LatestFrameReader, SequentialFrameReader
 from .parity import PipelineParityError, compare_rgb_image_pipeline
 from .path_safety import OutputPathError, validate_output_paths
 
@@ -23,6 +23,7 @@ __all__ = [
     "InferenceError",
     "LatestFrameBuffer",
     "LatestFrameReader",
+    "SequentialFrameReader",
     "OnnxRuntimePredictor",
     "OrtModelContract",
     "OrtPredictorError",
