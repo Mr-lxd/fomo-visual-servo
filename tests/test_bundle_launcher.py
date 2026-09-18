@@ -132,3 +132,13 @@ def test_pi_runtime_requirement_profiles_keep_gui_optional() -> None:
     joined = "\n".join(headless + preview).lower()
     for forbidden in ("torch", "torchvision", "cuda", "training", "models"):
         assert forbidden not in joined
+
+
+def test_repo_launcher_dispatches_vision_live_without_pythonpath() -> None:
+    result = _run_launcher(REPO_ROOT, ["vision_live", "--help"], cwd=REPO_ROOT)
+
+    assert result.returncode == 0, result.stderr
+    assert "--source" in result.stdout
+    assert "--port" in result.stdout
+    assert "--jpeg-quality" in result.stdout
+    assert "--write-timeout" in result.stdout
