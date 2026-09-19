@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 from fomo_servo.vision.service import VisionServiceConfig
 
 
@@ -53,3 +55,62 @@ def test_cli_defaults_map_to_service_config_with_separate_capture_control() -> N
     assert "authority" not in destinations
     assert "rbrp" not in destinations
     assert "stm32" not in destinations
+
+
+def test_cli_forwards_both_inference_artifacts_exactly() -> None:
+    module = _load_script()
+    onnx_path = Path("artifacts/model.onnx")
+    report_path = Path("artifacts/report.json")
+
+    args = module.build_parser().parse_args(
+        [
+            "--inference-onnx",
+            str(onnx_path),
+            "--inference-report",
+            str(report_path),
+        ]
+    )
+
+    config = module.service_config_from_args(args)
+
+    assert config.inference_onnx == onnx_path
+    assert config.inference_report == report_path
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--inference-onnx", "artifacts/model.onnx"],
+        ["--inference-report", "artifacts/report.json"],
+    ],
+)
+def test_main_rejects_incomplete_inference_pair_before_service_startup(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_script()
+    constructed: list[object] = []
+
+    def unexpected_service(config: object) -> object:
+        constructed.append(config)
+        raise AssertionError("VisionService construction was reached")
+
+    monkeypatch.setattr(module, "VisionService", unexpected_service)
+
+    with pytest.raises(SystemExit) as error:
+        module.main(argv)
+
+    assert error.value.code == 2
+    assert constructed == []
+    assert "inference_onnx and inference_report" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "unsupported_option", ["--confidence-threshold", "--strategy", "--tracking"]
+)
+def test_parser_rejects_unsupported_inference_options(unsupported_option: str) -> None:
+    module = _load_script()
+
+    with pytest.raises(SystemExit) as error:
+        module.build_parser().parse_args([unsupported_option])
+
+    assert error.value.code == 2

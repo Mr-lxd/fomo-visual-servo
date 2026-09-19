@@ -34,11 +34,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--capture-queue-mib", type=int, default=64)
     parser.add_argument("--capture-min-free-mib", type=int, default=512)
+    parser.add_argument("--inference-onnx", type=Path)
+    parser.add_argument("--inference-report", type=Path)
     parser.add_argument("--log-level", default="INFO")
     return parser
 
 
 def service_config_from_args(args: argparse.Namespace) -> VisionServiceConfig:
+    if (args.inference_onnx is None) != (args.inference_report is None):
+        raise ValueError(
+            "inference_onnx and inference_report must be supplied together"
+        )
+
     return VisionServiceConfig(
         source=args.source,
         width=args.width,
@@ -54,17 +61,25 @@ def service_config_from_args(args: argparse.Namespace) -> VisionServiceConfig:
         capture_output_root=args.capture_output_root,
         capture_queue_bytes=args.capture_queue_mib * 1024 * 1024,
         capture_min_free_bytes=args.capture_min_free_mib * 1024 * 1024,
+        inference_onnx=args.inference_onnx,
+        inference_report=args.inference_report,
     )
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        config = service_config_from_args(args)
+    except ValueError as error:
+        parser.error(str(error))
+
     logging.basicConfig(
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    service = VisionService(service_config_from_args(args))
+    service = VisionService(config)
     try:
         service.start_live()
         facts = service.camera_owner.facts
