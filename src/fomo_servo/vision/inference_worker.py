@@ -79,6 +79,7 @@ class InferenceWorker:
         self._wait_timeout = wait_timeout
         self._fps_window_size = fps_window_size
         self._lock = threading.RLock()
+        self._state_condition = threading.Condition(self._lock)
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._state = InferenceState.DISABLED
@@ -93,7 +94,7 @@ class InferenceWorker:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise RuntimeError("inference worker is already running")
-            self._state = InferenceState.STARTING
+            self._set_state_locked(InferenceState.STARTING)
             self._identity = None
             self._last_error = None
             self._after_frame_id = None
@@ -121,7 +122,7 @@ class InferenceWorker:
                 and self._thread is thread
                 and self._state != InferenceState.FAILED
             ):
-                self._state = InferenceState.DISABLED
+                self._set_state_locked(InferenceState.DISABLED)
                 self._identity = None
                 self._last_error = None
                 self._after_frame_id = None
@@ -154,6 +155,10 @@ class InferenceWorker:
         with self._lock:
             return self._latest_result
 
+    def _set_state_locked(self, state: InferenceState) -> None:
+        self._state = state
+        self._state_condition.notify_all()
+
     def _run(self) -> None:
         try:
             predictor = self._predictor_factory(self._onnx_path, self._report_path)
@@ -163,7 +168,7 @@ class InferenceWorker:
             after_frame_id = None if cached is None else cached.frame_id
         except Exception as error:
             with self._lock:
-                self._state = InferenceState.FAILED
+                self._set_state_locked(InferenceState.FAILED)
                 self._identity = None
                 self._after_frame_id = None
                 self._last_error = str(error) or type(error).__name__
@@ -171,7 +176,7 @@ class InferenceWorker:
 
         with self._lock:
             if self._stop_event.is_set():
-                self._state = InferenceState.DISABLED
+                self._set_state_locked(InferenceState.DISABLED)
                 self._identity = None
                 self._last_error = None
                 self._after_frame_id = None
@@ -182,7 +187,7 @@ class InferenceWorker:
                 "confidence_threshold": contract.confidence_threshold,
             }
             self._after_frame_id = after_frame_id
-            self._state = InferenceState.RUNNING
+            self._set_state_locked(InferenceState.RUNNING)
 
         self._stop_event.wait()
 

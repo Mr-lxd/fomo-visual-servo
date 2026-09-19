@@ -48,11 +48,15 @@ def fake_contract() -> SimpleNamespace:
 
 def _wait_for_state(worker: InferenceWorker, expected: InferenceState) -> dict:
     deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        status = worker.status()
-        if status["state"] == expected.value:
-            return status
-        time.sleep(0.01)
+    with worker._state_condition:
+        while True:
+            status = worker.status()
+            if status["state"] == expected.value:
+                return status
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            worker._state_condition.wait(remaining)
     pytest.fail(f"worker did not reach {expected.value}: {worker.status()}")
 
 
@@ -139,6 +143,19 @@ def test_worker_uses_monotonic_clock_by_default_and_preserves_explicit_clock(
 
     assert default_worker._clock_ns is time.monotonic_ns
     assert explicit_worker._clock_ns is explicit_clock
+
+
+def test_worker_owns_private_state_condition_for_lifecycle_waits(
+    tmp_path: Path,
+) -> None:
+    worker = InferenceWorker(
+        FrameHub(),
+        onnx_path=tmp_path / "model.onnx",
+        report_path=tmp_path / "report.json",
+        predictor_factory=lambda *_args: None,
+    )
+
+    assert isinstance(worker._state_condition, threading.Condition)
 
 
 def test_worker_initializes_in_worker_thread_and_publishes_running_identity(
