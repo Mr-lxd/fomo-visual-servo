@@ -36,6 +36,7 @@ class VisionControlServer:
         facts_provider: Callable[[], Optional[CameraFacts]],
         camera_running: Callable[[], bool],
         measured_fps_provider: Callable[[], Optional[float]],
+        inference_status_provider: Optional[Callable[[], dict]] = None,
         bind_host: str = "0.0.0.0",
         port: int = DEFAULT_CONTROL_PORT,
         snapshot_timeout: float = DEFAULT_SNAPSHOT_TIMEOUT_SECONDS,
@@ -45,6 +46,7 @@ class VisionControlServer:
         self._facts_provider = facts_provider
         self._camera_running = camera_running
         self._measured_fps_provider = measured_fps_provider
+        self._inference_status_provider = inference_status_provider
         self._bind_host = bind_host
         self._port = port
         self._snapshot_timeout = snapshot_timeout
@@ -122,7 +124,7 @@ class VisionControlServer:
         latest = self._hub.snapshot()
         facts = self._facts_provider()
         measured_fps = self._measured_fps_provider()
-        return {
+        payload = {
             "ok": True,
             "camera": {
                 "running": bool(self._camera_running()),
@@ -145,6 +147,9 @@ class VisionControlServer:
             },
             "capture": self._manager.status(),
         }
+        if self._inference_status_provider is not None:
+            payload["inference"] = self._inference_status_provider()
+        return payload
 
     def _fresh_snapshot(self) -> dict:
         facts = self._facts_provider()

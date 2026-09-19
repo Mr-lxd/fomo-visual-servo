@@ -77,6 +77,13 @@ class VisionService:
             capture_factory=capture_factory,
             frame_callback=self.capture_manager.offer_frame,
         )
+        self.inference_worker: InferenceWorker | None = None
+        if onnx_configured and report_configured:
+            self.inference_worker = InferenceWorker(
+                self.hub,
+                config.inference_onnx,
+                config.inference_report,
+            )
         self.stream_server = VisionTcpServer(
             self.hub,
             bind_host=config.bind_host,
@@ -93,6 +100,7 @@ class VisionService:
             measured_fps_provider=(
                 lambda: self.camera_owner.measured_capture_fps
             ),
+            inference_status_provider=self._inference_status,
             bind_host=config.bind_host,
             port=config.control_port,
         )
@@ -101,13 +109,24 @@ class VisionService:
             self.camera_owner,
             self.stream_server,
         )
-        self.inference_worker: InferenceWorker | None = None
-        if onnx_configured and report_configured:
-            self.inference_worker = InferenceWorker(
-                self.hub,
-                config.inference_onnx,
-                config.inference_report,
-            )
+
+    def _inference_status(self) -> dict:
+        if self.inference_worker is None:
+            return {
+                "state": "disabled",
+                "artifact_name": None,
+                "model_sha256": None,
+                "confidence_threshold": None,
+                "latest_frame_id": None,
+                "capture_timestamp_ns": None,
+                "processed_frames": 0,
+                "skipped_frames": 0,
+                "inference_fps": None,
+                "latency_ms": None,
+                "detection_count": None,
+                "last_error": None,
+            }
+        return self.inference_worker.status()
 
     def start_live(self) -> None:
         if self.mode_manager.mode is VisionMode.LIVE:
