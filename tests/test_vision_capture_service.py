@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -79,6 +80,7 @@ class _RecordingInferenceWorker:
         self.report_path = report_path
         self.failed = False
         self.stop_count = 0
+        self.stop_error: BaseException | None = None
         type(self).instances.append(self)
 
     def start(self) -> None:
@@ -87,6 +89,8 @@ class _RecordingInferenceWorker:
     def stop(self) -> None:
         self.stop_count += 1
         self.events.append("inference.stop")
+        if self.stop_error is not None:
+            raise self.stop_error
 
 
 class _RecordingModeManager:
@@ -250,18 +254,51 @@ def test_async_worker_failure_does_not_roll_back_live_mode(
     events: list[str] = []
     service = _service_with_lifecycle_doubles(monkeypatch, tmp_path, events)
     worker = _RecordingInferenceWorker.instances[0]
+    failure_condition = threading.Condition()
+    start_returned = threading.Event()
 
     def fail_asynchronously() -> None:
         worker.events.append("inference.start")
-        worker.failed = True
+        def fail_after_start_returns() -> None:
+            start_returned.wait()
+            with failure_condition:
+                worker.failed = True
+                failure_condition.notify_all()
+
+        worker.failure_thread = threading.Thread(
+            target=fail_after_start_returns,
+            name="test-inference-failure",
+        )
+        worker.failure_thread.start()
 
     worker.start = fail_asynchronously  # type: ignore[method-assign]
 
     service.start_live()
+    start_returned.set()
+    with failure_condition:
+        assert failure_condition.wait_for(lambda: worker.failed, timeout=1.0)
+    worker.failure_thread.join(timeout=1.0)
 
     assert worker.failed is True
     assert service.mode_manager.mode is VisionMode.LIVE
     assert "mode.shutdown" not in events
+    assert events == [
+        "mode.live",
+        "inference.start",
+        "control.start",
+    ]
+
+
+def test_start_live_is_idempotent_when_mode_is_already_live(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    service = _service_with_lifecycle_doubles(monkeypatch, tmp_path, events)
+
+    service.start_live()
+    service.start_live()
+
     assert events == [
         "mode.live",
         "inference.start",
@@ -281,6 +318,33 @@ def test_control_start_failure_rolls_back_mode_and_worker(
         control_error=RuntimeError("control start failed"),
     )
     worker = _RecordingInferenceWorker.instances[0]
+
+    with pytest.raises(RuntimeError, match="control start failed"):
+        service.start_live()
+
+    assert worker.stop_count == 1
+    assert events == [
+        "mode.live",
+        "inference.start",
+        "control.start",
+        "inference.stop",
+        "mode.shutdown",
+    ]
+
+
+def test_control_start_failure_preserves_original_when_worker_cleanup_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    service = _service_with_lifecycle_doubles(
+        monkeypatch,
+        tmp_path,
+        events,
+        control_error=RuntimeError("control start failed"),
+    )
+    worker = _RecordingInferenceWorker.instances[0]
+    worker.stop_error = RuntimeError("worker stop failed")
 
     with pytest.raises(RuntimeError, match="control start failed"):
         service.start_live()

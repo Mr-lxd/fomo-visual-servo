@@ -110,6 +110,8 @@ class VisionService:
             )
 
     def start_live(self) -> None:
+        if self.mode_manager.mode is VisionMode.LIVE:
+            return
         self.mode_manager.set_mode(VisionMode.LIVE)
         try:
             if self.inference_worker is not None:
@@ -119,8 +121,9 @@ class VisionService:
             try:
                 if self.inference_worker is not None:
                     self.inference_worker.stop()
-            finally:
-                self.mode_manager.shutdown()
+            except BaseException:
+                pass
+            self.mode_manager.shutdown()
             raise
 
     def shutdown(self) -> None:
