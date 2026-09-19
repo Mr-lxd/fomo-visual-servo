@@ -79,6 +79,19 @@ def _wait_for_state(worker: InferenceWorker, expected: InferenceState) -> dict:
     pytest.fail(f"worker did not reach {expected.value}: {worker.status()}")
 
 
+def _wait_for_latest_result(worker: InferenceWorker) -> InferenceResult:
+    deadline = time.monotonic() + 2.0
+    with worker._state_condition:
+        while worker._latest_result is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            worker._state_condition.wait(remaining)
+        if worker._latest_result is not None:
+            return worker._latest_result
+    pytest.fail("worker did not publish an inference result")
+
+
 def _worker(tmp_path: Path, hub: FrameHub, factory) -> InferenceWorker:
     return InferenceWorker(
         hub,
@@ -294,13 +307,7 @@ def test_worker_publishes_rgb_inference_result_bound_to_source_frame(
         _wait_for_state(worker, InferenceState.RUNNING)
         hub.publish(frame)
 
-        deadline = time.monotonic() + 2.0
-        result = worker.latest_result()
-        while result is None and time.monotonic() < deadline:
-            time.sleep(0.001)
-            result = worker.latest_result()
-
-        assert result is not None
+        result = _wait_for_latest_result(worker)
         assert len(predictor_holder) == 1
         assert len(predictor_holder[0].received_images) == 1
         received_rgb = predictor_holder[0].received_images[0]
@@ -314,6 +321,97 @@ def test_worker_publishes_rgb_inference_result_bound_to_source_frame(
         assert isinstance(result.detections, tuple)
         assert isinstance(result.detections[0], Detection)
     finally:
+        worker.stop()
+
+
+def test_worker_fences_processing_exception_and_enters_failed(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    class FailingPredictor(FakePredictor):
+        def predict_rgb_image(self, image: np.ndarray) -> SimpleNamespace:
+            raise RuntimeError("predictor boom")
+
+    hub = FrameHub()
+    worker = _worker(
+        tmp_path,
+        hub,
+        lambda *_args: FailingPredictor(fake_contract),
+    )
+    worker.start()
+    try:
+        _wait_for_state(worker, InferenceState.RUNNING)
+        hub.publish(
+            VisionFrame(
+                frame_id=6,
+                capture_timestamp_ns=123457,
+                width=1,
+                height=1,
+                pixel_format=PixelFormat.BGR8,
+                image=np.array([[[11, 22, 33]]], dtype=np.uint8),
+            )
+        )
+
+        failed = _wait_for_state(worker, InferenceState.FAILED)
+        assert failed["last_error"] == "predictor boom"
+        assert worker.latest_result() is None
+    finally:
+        worker.stop()
+
+
+def test_worker_discards_result_when_stop_requested_before_publish(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    class StopBeforePublishPredictor(FakePredictor):
+        def __init__(self, contract: object) -> None:
+            super().__init__(contract)
+            self.ready_to_return = threading.Event()
+            self.release_return = threading.Event()
+
+        def predict_rgb_image(self, image: np.ndarray) -> SimpleNamespace:
+            prediction = super().predict_rgb_image(image)
+            self.ready_to_return.set()
+            assert self.release_return.wait(2.0)
+            return prediction
+
+    hub = FrameHub()
+    predictor_holder: list[StopBeforePublishPredictor] = []
+
+    def factory(_onnx_path: Path, _report_path: Path) -> StopBeforePublishPredictor:
+        predictor = StopBeforePublishPredictor(fake_contract)
+        predictor_holder.append(predictor)
+        return predictor
+
+    worker = _worker(tmp_path, hub, factory)
+    worker.start()
+    try:
+        _wait_for_state(worker, InferenceState.RUNNING)
+        hub.publish(
+            VisionFrame(
+                frame_id=7,
+                capture_timestamp_ns=123458,
+                width=1,
+                height=1,
+                pixel_format=PixelFormat.BGR8,
+                image=np.array([[[11, 22, 33]]], dtype=np.uint8),
+            )
+        )
+        assert predictor_holder[0].ready_to_return.wait(2.0)
+
+        stop_finished = threading.Event()
+        stopper = threading.Thread(
+            target=lambda: (worker.stop(), stop_finished.set()), daemon=True
+        )
+        stopper.start()
+        assert worker._stop_event.wait(2.0)
+        predictor_holder[0].release_return.set()
+
+        assert stop_finished.wait(2.0)
+        stopper.join(2.0)
+        assert worker.latest_result() is None
+    finally:
+        predictor = predictor_holder[0] if predictor_holder else None
+        if predictor is not None:
+            predictor.release_return.set()
         worker.stop()
 
 
