@@ -28,6 +28,15 @@ class InferenceState(str, Enum):
 
 
 @dataclass(frozen=True)
+class ModelIdentity:
+    """Immutable identity of the validated model used for inference."""
+
+    artifact_name: str
+    onnx_sha256: str
+    confidence_threshold: float
+
+
+@dataclass(frozen=True)
 class InferenceResult:
     """One completed inference result associated with one captured frame."""
 
@@ -35,6 +44,8 @@ class InferenceResult:
     capture_timestamp_ns: int
     inference_started_ns: int
     inference_finished_ns: int
+    latency_ms: float
+    model_identity: ModelIdentity
     detections: tuple[Detection, ...]
 
 
@@ -85,7 +96,7 @@ class InferenceWorker:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._state = InferenceState.DISABLED
-        self._identity: Optional[dict[str, Any]] = None
+        self._identity: Optional[ModelIdentity] = None
         self._last_error: Optional[str] = None
         self._after_frame_id: Optional[int] = None
         self._latest_result: Optional[InferenceResult] = None
@@ -136,10 +147,10 @@ class InferenceWorker:
             identity = self._identity
             return {
                 "state": self._state.value,
-                "artifact_name": None if identity is None else identity["artifact_name"],
-                "model_sha256": None if identity is None else identity["onnx_sha256"],
+                "artifact_name": None if identity is None else identity.artifact_name,
+                "model_sha256": None if identity is None else identity.onnx_sha256,
                 "confidence_threshold": (
-                    None if identity is None else identity["confidence_threshold"]
+                    None if identity is None else identity.confidence_threshold
                 ),
                 "latest_frame_id": None,
                 "capture_timestamp_ns": None,
@@ -176,6 +187,11 @@ class InferenceWorker:
                 self._last_error = str(error) or type(error).__name__
             return
 
+        model_identity = ModelIdentity(
+            artifact_name=contract.artifact_name,
+            onnx_sha256=contract.onnx_sha256,
+            confidence_threshold=contract.confidence_threshold,
+        )
         with self._lock:
             if self._stop_event.is_set():
                 self._set_state_locked(InferenceState.DISABLED)
@@ -183,21 +199,17 @@ class InferenceWorker:
                 self._last_error = None
                 self._after_frame_id = None
                 return
-            self._identity = {
-                "artifact_name": contract.artifact_name,
-                "onnx_sha256": contract.onnx_sha256,
-                "confidence_threshold": contract.confidence_threshold,
-            }
+            self._identity = model_identity
             self._after_frame_id = after_frame_id
             self._set_state_locked(InferenceState.RUNNING)
 
         while not self._stop_event.is_set():
-            frame = self._hub.wait_for_newer(
-                after_frame_id, timeout=self._wait_timeout
-            )
-            if frame is None:
-                continue
             try:
+                frame = self._hub.wait_for_newer(
+                    after_frame_id, timeout=self._wait_timeout
+                )
+                if frame is None:
+                    continue
                 started = self._clock_ns()
                 rgb = cv2.cvtColor(frame.image, cv2.COLOR_BGR2RGB)
                 prediction = predictor.predict_rgb_image(rgb)
@@ -207,6 +219,8 @@ class InferenceWorker:
                     capture_timestamp_ns=frame.capture_timestamp_ns,
                     inference_started_ns=started,
                     inference_finished_ns=finished,
+                    latency_ms=(finished - frame.capture_timestamp_ns) / 1_000_000.0,
+                    model_identity=model_identity,
                     detections=tuple(prediction.detections),
                 )
                 with self._lock:

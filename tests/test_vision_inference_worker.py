@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, is_dataclass
 from pathlib import Path
 from types import SimpleNamespace
 import threading
@@ -17,6 +17,7 @@ from fomo_servo.vision.inference_worker import (
     InferenceResult,
     InferenceState,
     InferenceWorker,
+    ModelIdentity,
 )
 
 
@@ -35,6 +36,12 @@ EXPECTED_CONTRACT = {
     "output_semantic": "raw_logits",
     "opset": 17,
 }
+
+EXPECTED_MODEL_IDENTITY = ModelIdentity(
+    artifact_name=EXPECTED_CONTRACT["artifact_name"],
+    onnx_sha256=EXPECTED_CONTRACT["onnx_sha256"],
+    confidence_threshold=EXPECTED_CONTRACT["confidence_threshold"],
+)
 
 
 class FakePredictor:
@@ -116,13 +123,19 @@ def test_inference_result_is_frozen_and_reuses_detection_type() -> None:
         capture_timestamp_ns=100,
         inference_started_ns=110,
         inference_finished_ns=120,
+        latency_ms=0.00002,
+        model_identity=EXPECTED_MODEL_IDENTITY,
         detections=(),
     )
 
     assert result.detections == ()
     assert get_type_hints(InferenceResult)["detections"] == tuple[Detection, ...]
+    assert get_type_hints(InferenceResult)["model_identity"] is ModelIdentity
+    assert is_dataclass(result.model_identity)
     with pytest.raises(FrozenInstanceError):
         result.frame_id = 8  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        result.model_identity.artifact_name = "changed"  # type: ignore[misc]
 
 
 def test_worker_exposes_disabled_status_before_start(tmp_path: Path) -> None:
@@ -242,6 +255,8 @@ def test_start_clears_stale_latest_result_for_new_generation(
         capture_timestamp_ns=100,
         inference_started_ns=101,
         inference_finished_ns=102,
+        latency_ms=0.000002,
+        model_identity=EXPECTED_MODEL_IDENTITY,
         detections=(),
     )
     worker.start()
@@ -286,13 +301,13 @@ def test_worker_publishes_rgb_inference_result_bound_to_source_frame(
     source_image_before = source_image.copy()
     frame = VisionFrame(
         frame_id=5,
-        capture_timestamp_ns=123456,
+        capture_timestamp_ns=1_000_000,
         width=1,
         height=1,
         pixel_format=PixelFormat.BGR8,
         image=source_image,
     )
-    clock_values = iter((1001, 1002))
+    clock_values = iter((1_001_000, 1_002_500))
     predictor_holder: list[FakePredictor] = []
 
     def factory(_onnx_path: Path, _report_path: Path) -> FakePredictor:
@@ -316,8 +331,11 @@ def test_worker_publishes_rgb_inference_result_bound_to_source_frame(
         np.testing.assert_array_equal(source_image, source_image_before)
         assert result.frame_id == frame.frame_id
         assert result.capture_timestamp_ns == frame.capture_timestamp_ns
-        assert result.inference_started_ns == 1001
-        assert result.inference_finished_ns == 1002
+        assert result.inference_started_ns == 1_001_000
+        assert result.inference_finished_ns == 1_002_500
+        assert result.latency_ms == 0.0025
+        assert result.model_identity == EXPECTED_MODEL_IDENTITY
+        assert result.model_identity.onnx_sha256 == EXPECTED_CONTRACT["onnx_sha256"]
         assert isinstance(result.detections, tuple)
         assert isinstance(result.detections[0], Detection)
     finally:
@@ -354,6 +372,26 @@ def test_worker_fences_processing_exception_and_enters_failed(
         failed = _wait_for_state(worker, InferenceState.FAILED)
         assert failed["last_error"] == "predictor boom"
         assert worker.latest_result() is None
+    finally:
+        worker.stop()
+
+
+def test_worker_fences_frame_hub_wait_exception_and_enters_failed(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    class FailingHub(FrameHub):
+        def wait_for_newer(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("frame hub boom")
+
+    worker = _worker(
+        tmp_path,
+        FailingHub(),
+        lambda *_args: FakePredictor(fake_contract),
+    )
+    worker.start()
+    try:
+        failed = _wait_for_state(worker, InferenceState.FAILED)
+        assert failed["last_error"] == "frame hub boom"
     finally:
         worker.stop()
 
