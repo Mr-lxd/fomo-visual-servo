@@ -11,6 +11,7 @@ from fomo_servo.capture.manager import CaptureConfig, CaptureManager
 
 from .camera_owner import CameraOwner
 from .frame_hub import FrameHub
+from .inference_worker import InferenceWorker
 from .mode import VisionMode, VisionModeManager
 from .streaming import (
     DEFAULT_JPEG_QUALITY,
@@ -37,6 +38,8 @@ class VisionServiceConfig:
     capture_output_root: Path = Path("datasets_raw/robobeetle")
     capture_queue_bytes: int = 64 * 1024 * 1024
     capture_min_free_bytes: int = 512 * 1024 * 1024
+    inference_onnx: Path | None = None
+    inference_report: Path | None = None
 
 
 class VisionService:
@@ -48,6 +51,13 @@ class VisionService:
         *,
         capture_factory: Optional[Callable[[int | str], Any]] = None,
     ) -> None:
+        onnx_configured = config.inference_onnx is not None
+        report_configured = config.inference_report is not None
+        if onnx_configured != report_configured:
+            raise ValueError(
+                "inference_onnx and inference_report must be supplied together"
+            )
+
         self.config = config
         self.hub = FrameHub()
         self.capture_manager = CaptureManager(
@@ -91,22 +101,38 @@ class VisionService:
             self.camera_owner,
             self.stream_server,
         )
+        self.inference_worker: InferenceWorker | None = None
+        if onnx_configured and report_configured:
+            self.inference_worker = InferenceWorker(
+                self.hub,
+                config.inference_onnx,
+                config.inference_report,
+            )
 
     def start_live(self) -> None:
         self.mode_manager.set_mode(VisionMode.LIVE)
         try:
+            if self.inference_worker is not None:
+                self.inference_worker.start()
             self.control_server.start()
         except BaseException:
-            self.mode_manager.shutdown()
+            try:
+                if self.inference_worker is not None:
+                    self.inference_worker.stop()
+            finally:
+                self.mode_manager.shutdown()
             raise
 
     def shutdown(self) -> None:
         first_error: BaseException | None = None
-        for cleanup in (
+        cleanups = [
             self.control_server.stop,
             self.capture_manager.shutdown,
-            self.mode_manager.shutdown,
-        ):
+        ]
+        if self.inference_worker is not None:
+            cleanups.append(self.inference_worker.stop)
+        cleanups.append(self.mode_manager.shutdown)
+        for cleanup in cleanups:
             try:
                 cleanup()
             except BaseException as error:
