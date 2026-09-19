@@ -117,13 +117,19 @@ class VisionService:
             if self.inference_worker is not None:
                 self.inference_worker.start()
             self.control_server.start()
-        except BaseException:
+        except BaseException as startup_error:
+            cleanup_errors: list[BaseException] = []
             try:
                 if self.inference_worker is not None:
                     self.inference_worker.stop()
-            except BaseException:
-                pass
-            self.mode_manager.shutdown()
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+            try:
+                self.mode_manager.shutdown()
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+            if cleanup_errors:
+                raise startup_error from cleanup_errors[0]
             raise
 
     def shutdown(self) -> None:

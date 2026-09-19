@@ -94,17 +94,26 @@ class _RecordingInferenceWorker:
 
 
 class _RecordingModeManager:
-    def __init__(self, events: list[str]) -> None:
+    def __init__(
+        self,
+        events: list[str],
+        shutdown_error: BaseException | None = None,
+    ) -> None:
         self.events = events
         self.mode = VisionMode.OFF
+        self.shutdown_error = shutdown_error
+        self.shutdown_count = 0
 
     def set_mode(self, mode: VisionMode) -> None:
         self.events.append(f"mode.{mode.value}")
         self.mode = mode
 
     def shutdown(self) -> None:
+        self.shutdown_count += 1
         self.events.append("mode.shutdown")
         self.mode = VisionMode.OFF
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
 
 
 class _RecordingControlServer:
@@ -135,6 +144,7 @@ def _service_with_lifecycle_doubles(
     events: list[str],
     *,
     control_error: BaseException | None = None,
+    mode_error: BaseException | None = None,
 ) -> VisionService:
     _RecordingInferenceWorker.instances.clear()
     _RecordingInferenceWorker.event_log = events
@@ -151,7 +161,10 @@ def _service_with_lifecycle_doubles(
             capture_min_free_bytes=0,
         )
     )
-    service.mode_manager = _RecordingModeManager(events)
+    service.mode_manager = _RecordingModeManager(
+        events,
+        shutdown_error=mode_error,
+    )
     service.control_server = _RecordingControlServer(
         events,
         error=control_error,
@@ -350,6 +363,34 @@ def test_control_start_failure_preserves_original_when_worker_cleanup_fails(
         service.start_live()
 
     assert worker.stop_count == 1
+    assert events == [
+        "mode.live",
+        "inference.start",
+        "control.start",
+        "inference.stop",
+        "mode.shutdown",
+    ]
+
+
+def test_control_start_failure_preserves_original_when_mode_rollback_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    service = _service_with_lifecycle_doubles(
+        monkeypatch,
+        tmp_path,
+        events,
+        control_error=RuntimeError("control start failed"),
+        mode_error=RuntimeError("mode shutdown failed"),
+    )
+    worker = _RecordingInferenceWorker.instances[0]
+
+    with pytest.raises(RuntimeError, match="control start failed"):
+        service.start_live()
+
+    assert worker.stop_count == 1
+    assert service.mode_manager.shutdown_count == 1
     assert events == [
         "mode.live",
         "inference.start",
