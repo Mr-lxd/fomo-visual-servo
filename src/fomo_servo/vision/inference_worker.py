@@ -113,6 +113,16 @@ class InferenceWorker:
         stop_event.set()
         if thread is not None and thread is not threading.current_thread():
             thread.join()
+        with self._lock:
+            if (
+                thread is not None
+                and self._thread is thread
+                and self._state != InferenceState.FAILED
+            ):
+                self._state = InferenceState.DISABLED
+                self._identity = None
+                self._last_error = None
+                self._after_frame_id = None
 
     def status(self) -> dict[str, Any]:
         """Return the lifecycle snapshot and validated model identity."""
@@ -157,6 +167,12 @@ class InferenceWorker:
             return
 
         with self._lock:
+            if self._stop_event.is_set():
+                self._state = InferenceState.DISABLED
+                self._identity = None
+                self._last_error = None
+                self._after_frame_id = None
+                return
             self._identity = {
                 "artifact_name": contract.artifact_name,
                 "onnx_sha256": contract.onnx_sha256,
@@ -185,8 +201,19 @@ class InferenceWorker:
                     )
                 )
             else:
-                matches = type(actual) is type(expected) and actual == expected
+                matches = InferenceWorker._strict_equal(actual, expected)
             if not matches:
                 raise ValueError(
                     f"contract mismatch: {field} expected {expected!r}, got {actual!r}"
                 )
+
+    @staticmethod
+    def _strict_equal(actual: Any, expected: Any) -> bool:
+        if type(actual) is not type(expected):
+            return False
+        if isinstance(expected, tuple):
+            return len(actual) == len(expected) and all(
+                InferenceWorker._strict_equal(item, expected_item)
+                for item, expected_item in zip(actual, expected)
+            )
+        return actual == expected

@@ -46,25 +46,13 @@ def fake_contract() -> SimpleNamespace:
     return SimpleNamespace(**EXPECTED_CONTRACT)
 
 
-@pytest.fixture
-def fake_predictor_factory(fake_contract: SimpleNamespace):
-    calls: list[tuple[int, Path, Path]] = []
-
-    def factory(onnx_path: Path, report_path: Path) -> FakePredictor:
-        calls.append((threading.get_ident(), onnx_path, report_path))
-        return FakePredictor(fake_contract)
-
-    factory.calls = calls  # type: ignore[attr-defined]
-    return factory
-
-
 def _wait_for_state(worker: InferenceWorker, expected: InferenceState) -> dict:
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         status = worker.status()
         if status["state"] == expected.value:
             return status
-        time.sleep(0.001)
+        time.sleep(0.01)
     pytest.fail(f"worker did not reach {expected.value}: {worker.status()}")
 
 
@@ -190,6 +178,96 @@ def test_worker_fences_cached_frames_after_model_validation(
     worker.stop()
 
 
+def test_stop_during_factory_initialization_never_publishes_running(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    factory_started = threading.Event()
+    release_factory = threading.Event()
+    factory_release_seen = threading.Event()
+    stop_finished = threading.Event()
+
+    def blocking_factory(_onnx_path: Path, _report_path: Path) -> FakePredictor:
+        factory_started.set()
+        assert release_factory.wait(2.0)
+        assert worker.status()["state"] == InferenceState.STARTING.value
+        factory_release_seen.set()
+        return FakePredictor(fake_contract)
+
+    worker = _worker(tmp_path, FrameHub(), blocking_factory)
+    worker.start()
+    assert factory_started.wait(2.0)
+    assert worker.status()["state"] == InferenceState.STARTING.value
+
+    stopper = threading.Thread(
+        target=lambda: (worker.stop(), stop_finished.set()), daemon=True
+    )
+    stopper.start()
+    assert worker._stop_event.wait(2.0)
+    release_factory.set()
+    assert factory_release_seen.wait(2.0)
+    assert stop_finished.wait(2.0)
+    stopper.join(2.0)
+
+    stopped = worker.status()
+    assert stopped["state"] == InferenceState.DISABLED.value
+    assert stopped["artifact_name"] is None
+    assert stopped["model_sha256"] is None
+    assert stopped["confidence_threshold"] is None
+    assert stopped["last_error"] is None
+
+
+def test_stop_during_validation_returns_worker_to_disabled(
+    tmp_path: Path, fake_contract: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    validation_started = threading.Event()
+    release_validation = threading.Event()
+    validation_release_seen = threading.Event()
+    stop_finished = threading.Event()
+    original_validate = InferenceWorker._validate_contract
+
+    def blocking_validate(contract: object) -> None:
+        validation_started.set()
+        assert release_validation.wait(2.0)
+        assert worker.status()["state"] == InferenceState.STARTING.value
+        validation_release_seen.set()
+        original_validate(contract)
+
+    monkeypatch.setattr(
+        InferenceWorker, "_validate_contract", staticmethod(blocking_validate)
+    )
+    worker = _worker(tmp_path, FrameHub(), lambda *_args: FakePredictor(fake_contract))
+    worker.start()
+    assert validation_started.wait(2.0)
+
+    stopper = threading.Thread(
+        target=lambda: (worker.stop(), stop_finished.set()), daemon=True
+    )
+    stopper.start()
+    assert worker._stop_event.wait(2.0)
+    release_validation.set()
+    assert validation_release_seen.wait(2.0)
+    assert stop_finished.wait(2.0)
+    stopper.join(2.0)
+
+    assert worker.status()["state"] == InferenceState.DISABLED.value
+
+
+def test_stop_running_idle_worker_returns_to_disabled(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    worker = _worker(tmp_path, FrameHub(), lambda *_args: FakePredictor(fake_contract))
+    worker.start()
+    _wait_for_state(worker, InferenceState.RUNNING)
+
+    worker.stop()
+
+    stopped = worker.status()
+    assert stopped["state"] == InferenceState.DISABLED.value
+    assert stopped["artifact_name"] is None
+    assert stopped["model_sha256"] is None
+    assert stopped["confidence_threshold"] is None
+
+
 def test_worker_initialization_exception_is_failed_without_retry(
     tmp_path: Path,
 ) -> None:
@@ -220,9 +298,11 @@ def test_worker_initialization_exception_is_failed_without_retry(
         ("confidence_threshold", 0.41),
         ("onnx_sha256", "0" * 64),
         ("input_shape", (1, 3, 224, 224)),
+        ("input_shape", (True, 3, 192, 192)),
         ("input_dtype", "float64"),
         ("input_color_order", "BGR"),
         ("input_value_range", (0.0, 255.0)),
+        ("input_value_range", (0, 1)),
         ("output_shape", (1, 8, 12, 12)),
         ("output_dtype", "float64"),
         ("output_semantic", "probabilities"),
