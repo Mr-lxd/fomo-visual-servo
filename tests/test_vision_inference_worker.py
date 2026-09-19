@@ -873,6 +873,111 @@ def test_worker_initialization_exception_is_failed_without_retry(
     worker.stop()
 
 
+def test_worker_missing_model_failure_is_terminal_without_framehub_activity(
+    tmp_path: Path,
+) -> None:
+    class RecordingHub(FrameHub):
+        def __init__(self) -> None:
+            super().__init__()
+            self.snapshot_calls = 0
+            self.wait_calls = 0
+
+        def snapshot(self):
+            self.snapshot_calls += 1
+            return super().snapshot()
+
+        def wait_for_newer(self, *args: object, **kwargs: object):
+            self.wait_calls += 1
+            return super().wait_for_newer(*args, **kwargs)
+
+    hub = RecordingHub()
+    factory_calls: list[tuple[Path, Path]] = []
+    factory_finished = threading.Event()
+
+    def missing_model_factory(onnx_path: Path, report_path: Path) -> FakePredictor:
+        factory_calls.append((onnx_path, report_path))
+        factory_finished.set()
+        raise FileNotFoundError("model or sidecar missing")
+
+    worker = _worker(tmp_path, hub, missing_model_factory)
+    worker.start()
+    try:
+        assert factory_finished.wait(2.0)
+        failed = _wait_for_status(
+            worker,
+            lambda status: status["state"] == InferenceState.FAILED.value
+            and status["last_error"] == "model or sidecar missing",
+        )
+        thread = worker._thread
+        assert thread is not None
+        thread.join(2.0)
+
+        assert not thread.is_alive()
+        assert failed["artifact_name"] is None
+        assert failed["model_sha256"] is None
+        assert factory_calls == [
+            (tmp_path / "model.onnx", tmp_path / "report.json")
+        ]
+        assert hub.snapshot_calls == 0
+        assert hub.wait_calls == 0
+    finally:
+        worker.stop()
+
+
+def test_runtime_predictor_failure_preserves_published_result(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    class FailOnSecondPrediction(FakePredictor):
+        def __init__(self, contract: object) -> None:
+            super().__init__(contract)
+            self.prediction_count = 0
+            self.second_prediction_started = threading.Event()
+            self.release_second_prediction = threading.Event()
+
+        def predict_rgb_image(self, image: np.ndarray) -> SimpleNamespace:
+            self.prediction_count += 1
+            if self.prediction_count == 2:
+                self.second_prediction_started.set()
+                assert self.release_second_prediction.wait(2.0)
+                raise RuntimeError("predictor boom after result")
+            return super().predict_rgb_image(image)
+
+    predictor_holder: list[FailOnSecondPrediction] = []
+
+    def factory(_onnx_path: Path, _report_path: Path) -> FailOnSecondPrediction:
+        predictor = FailOnSecondPrediction(fake_contract)
+        predictor_holder.append(predictor)
+        return predictor
+
+    hub = FrameHub()
+    worker = _worker(tmp_path, hub, factory)
+    worker.start()
+    try:
+        _wait_for_state(worker, InferenceState.RUNNING)
+        hub.publish(_frame(1, 1_000))
+        published_result = _wait_for_latest_result(worker)
+
+        hub.publish(_frame(2, 2_000))
+        assert predictor_holder[0].second_prediction_started.wait(2.0)
+        predictor_holder[0].release_second_prediction.set()
+
+        failed = _wait_for_status(
+            worker,
+            lambda status: status["state"] == InferenceState.FAILED.value
+            and status["last_error"] == "predictor boom after result",
+        )
+
+        assert worker.latest_result() is published_result
+        assert failed["latest_frame_id"] == published_result.frame_id
+        assert failed["capture_timestamp_ns"] == published_result.capture_timestamp_ns
+        assert failed["processed_frames"] == 1
+        assert failed["last_error"] == "predictor boom after result"
+    finally:
+        if predictor_holder:
+            predictor_holder[0].release_second_prediction.set()
+        worker.stop()
+
+
 @pytest.mark.parametrize(
     ("field", "mismatched_value"),
     [
