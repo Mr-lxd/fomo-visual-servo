@@ -99,6 +99,31 @@ def _wait_for_latest_result(worker: InferenceWorker) -> InferenceResult:
     pytest.fail("worker did not publish an inference result")
 
 
+def _wait_for_status(worker: InferenceWorker, predicate) -> dict:
+    deadline = time.monotonic() + 2.0
+    with worker._state_condition:
+        while True:
+            status = worker.status()
+            if predicate(status):
+                return status
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            worker._state_condition.wait(remaining)
+    pytest.fail(f"worker status did not satisfy predicate: {worker.status()}")
+
+
+def _frame(frame_id: int, capture_timestamp_ns: int = 1) -> VisionFrame:
+    return VisionFrame(
+        frame_id=frame_id,
+        capture_timestamp_ns=capture_timestamp_ns,
+        width=1,
+        height=1,
+        pixel_format=PixelFormat.BGR8,
+        image=np.array([[[frame_id, 0, 0]]], dtype=np.uint8),
+    )
+
+
 def _worker(tmp_path: Path, hub: FrameHub, factory) -> InferenceWorker:
     return InferenceWorker(
         hub,
@@ -338,6 +363,138 @@ def test_worker_publishes_rgb_inference_result_bound_to_source_frame(
         assert result.model_identity.onnx_sha256 == EXPECTED_CONTRACT["onnx_sha256"]
         assert isinstance(result.detections, tuple)
         assert isinstance(result.detections[0], Detection)
+        status = worker.status()
+        assert status["latest_frame_id"] == frame.frame_id
+        assert status["capture_timestamp_ns"] == frame.capture_timestamp_ns
+        assert status["latency_ms"] == result.latency_ms
+        assert status["detection_count"] == len(result.detections)
+        assert status["inference_fps"] is None
+        assert status["processed_frames"] == 1
+        assert status["skipped_frames"] == 0
+        assert "processing_ms" not in status
+    finally:
+        worker.stop()
+
+
+def test_worker_skips_replaced_frames_while_predictor_is_blocked(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    class BlockingPredictor(FakePredictor):
+        def __init__(self, contract: object) -> None:
+            super().__init__(contract)
+            self.frame_100_started = threading.Event()
+            self.release_frame_100 = threading.Event()
+            self.received_frame_ids: list[int] = []
+
+        def predict_rgb_image(self, image: np.ndarray) -> SimpleNamespace:
+            self.received_frame_ids.append(int(image[0, 0, 2]))
+            if len(self.received_frame_ids) == 1:
+                self.frame_100_started.set()
+                assert self.release_frame_100.wait(2.0)
+            return super().predict_rgb_image(image)
+
+    hub = FrameHub()
+    hub.publish(_frame(99, 1_000))
+    predictor_holder: list[BlockingPredictor] = []
+
+    def factory(_onnx_path: Path, _report_path: Path) -> BlockingPredictor:
+        predictor = BlockingPredictor(fake_contract)
+        predictor_holder.append(predictor)
+        return predictor
+
+    worker = _worker(tmp_path, hub, factory)
+    worker.start()
+    try:
+        _wait_for_state(worker, InferenceState.RUNNING)
+        assert worker._after_frame_id == 99
+
+        hub.publish(_frame(100, 1_001))
+        assert predictor_holder[0].frame_100_started.wait(2.0)
+        hub.publish(_frame(101, 1_002))
+        hub.publish(_frame(102, 1_003))
+        hub.publish(_frame(103, 1_004))
+
+        predictor_holder[0].release_frame_100.set()
+        status = _wait_for_status(
+            worker,
+            lambda current: current["latest_frame_id"] == 103
+            and current["processed_frames"] == 2,
+        )
+
+        assert predictor_holder[0].received_frame_ids == [100, 103]
+        assert status["processed_frames"] == 2
+        assert status["skipped_frames"] == 2
+    finally:
+        predictor = predictor_holder[0] if predictor_holder else None
+        if predictor is not None:
+            predictor.release_frame_100.set()
+        worker.stop()
+
+
+def test_worker_inference_fps_uses_bounded_completion_window(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    hub = FrameHub()
+    clock_values = iter(
+        (
+            1_000_000,
+            2_000_000,
+            3_000_000,
+            4_000_000,
+            5_000_000,
+            8_000_000,
+        )
+    )
+    worker = InferenceWorker(
+        hub,
+        onnx_path=tmp_path / "model.onnx",
+        report_path=tmp_path / "report.json",
+        predictor_factory=lambda *_args: FakePredictor(fake_contract),
+        clock_ns=lambda: next(clock_values),
+        wait_timeout=0.01,
+        fps_window_size=2,
+    )
+    worker.start()
+    try:
+        _wait_for_state(worker, InferenceState.RUNNING)
+
+        hub.publish(_frame(1, 1))
+        first = _wait_for_status(worker, lambda status: status["latest_frame_id"] == 1)
+        assert first["inference_fps"] is None
+
+        hub.publish(_frame(2, 1))
+        second = _wait_for_status(worker, lambda status: status["latest_frame_id"] == 2)
+        assert second["inference_fps"] == pytest.approx(500.0)
+
+        hub.publish(_frame(3, 1))
+        third = _wait_for_status(worker, lambda status: status["latest_frame_id"] == 3)
+        assert third["inference_fps"] == pytest.approx(250.0)
+    finally:
+        worker.stop()
+
+
+def test_worker_inference_fps_is_none_when_completion_elapsed_is_nonpositive(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    hub = FrameHub()
+    clock_values = iter((1, 2, 3, 2))
+    worker = InferenceWorker(
+        hub,
+        onnx_path=tmp_path / "model.onnx",
+        report_path=tmp_path / "report.json",
+        predictor_factory=lambda *_args: FakePredictor(fake_contract),
+        clock_ns=lambda: next(clock_values),
+        wait_timeout=0.01,
+        fps_window_size=2,
+    )
+    worker.start()
+    try:
+        _wait_for_state(worker, InferenceState.RUNNING)
+        hub.publish(_frame(1, 1))
+        _wait_for_status(worker, lambda status: status["latest_frame_id"] == 1)
+        hub.publish(_frame(2, 1))
+        status = _wait_for_status(worker, lambda status: status["latest_frame_id"] == 2)
+        assert status["inference_fps"] is None
     finally:
         worker.stop()
 

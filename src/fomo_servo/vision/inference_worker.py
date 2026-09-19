@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 import math
@@ -100,6 +101,9 @@ class InferenceWorker:
         self._last_error: Optional[str] = None
         self._after_frame_id: Optional[int] = None
         self._latest_result: Optional[InferenceResult] = None
+        self._processed_frames = 0
+        self._skipped_frames = 0
+        self._completion_timestamps_ns: deque[int] = deque(maxlen=fps_window_size)
 
     def start(self) -> None:
         """Start model initialization once, rejecting another live start."""
@@ -112,6 +116,9 @@ class InferenceWorker:
             self._last_error = None
             self._after_frame_id = None
             self._latest_result = None
+            self._processed_frames = 0
+            self._skipped_frames = 0
+            self._completion_timestamps_ns.clear()
             self._stop_event = threading.Event()
             self._thread = threading.Thread(
                 target=self._run,
@@ -145,6 +152,17 @@ class InferenceWorker:
 
         with self._lock:
             identity = self._identity
+            result = self._latest_result
+            inference_fps = None
+            if len(self._completion_timestamps_ns) >= 2:
+                elapsed_ns = (
+                    self._completion_timestamps_ns[-1]
+                    - self._completion_timestamps_ns[0]
+                )
+                if elapsed_ns > 0:
+                    inference_fps = (len(self._completion_timestamps_ns) - 1) / (
+                        elapsed_ns / 1_000_000_000.0
+                    )
             return {
                 "state": self._state.value,
                 "artifact_name": None if identity is None else identity.artifact_name,
@@ -152,14 +170,16 @@ class InferenceWorker:
                 "confidence_threshold": (
                     None if identity is None else identity.confidence_threshold
                 ),
-                "latest_frame_id": None,
-                "capture_timestamp_ns": None,
-                "inference_fps": None,
-                "latency_ms": None,
-                "detection_count": None,
+                "latest_frame_id": None if result is None else result.frame_id,
+                "capture_timestamp_ns": (
+                    None if result is None else result.capture_timestamp_ns
+                ),
+                "inference_fps": inference_fps,
+                "latency_ms": None if result is None else result.latency_ms,
+                "detection_count": None if result is None else len(result.detections),
                 "last_error": self._last_error,
-                "processed_frames": 0,
-                "skipped_frames": 0,
+                "processed_frames": self._processed_frames,
+                "skipped_frames": self._skipped_frames,
             }
 
     def latest_result(self) -> Optional[InferenceResult]:
@@ -226,8 +246,17 @@ class InferenceWorker:
                 with self._lock:
                     if self._stop_event.is_set():
                         return
+                    skipped_frames = max(
+                        0,
+                        frame.frame_id - after_frame_id - 1
+                        if after_frame_id is not None
+                        else 0,
+                    )
                     self._after_frame_id = frame.frame_id
                     self._latest_result = result
+                    self._processed_frames += 1
+                    self._skipped_frames += skipped_frames
+                    self._completion_timestamps_ns.append(finished)
                     self._state_condition.notify_all()
                 after_frame_id = frame.frame_id
             except Exception as error:
