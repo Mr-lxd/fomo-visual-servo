@@ -119,6 +119,28 @@ def test_worker_exposes_disabled_status_before_start(tmp_path: Path) -> None:
     worker.stop()
 
 
+def test_worker_uses_monotonic_clock_by_default_and_preserves_explicit_clock(
+    tmp_path: Path,
+) -> None:
+    default_worker = InferenceWorker(
+        FrameHub(),
+        onnx_path=tmp_path / "default.onnx",
+        report_path=tmp_path / "default.json",
+        predictor_factory=lambda *_args: None,
+    )
+    explicit_clock = lambda: 123
+    explicit_worker = InferenceWorker(
+        FrameHub(),
+        onnx_path=tmp_path / "explicit.onnx",
+        report_path=tmp_path / "explicit.json",
+        predictor_factory=lambda *_args: None,
+        clock_ns=explicit_clock,
+    )
+
+    assert default_worker._clock_ns is time.monotonic_ns
+    assert explicit_worker._clock_ns is explicit_clock
+
+
 def test_worker_initializes_in_worker_thread_and_publishes_running_identity(
     tmp_path: Path, fake_contract: SimpleNamespace
 ) -> None:

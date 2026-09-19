@@ -7,6 +7,7 @@ from enum import Enum
 import math
 from pathlib import Path
 import threading
+import time
 from typing import Any, Callable, Optional
 
 from fomo_servo.inference.ort_predictor import OnnxRuntimePredictor
@@ -74,7 +75,7 @@ class InferenceWorker:
             if predictor_factory is None
             else predictor_factory
         )
-        self._clock_ns = clock_ns
+        self._clock_ns = time.monotonic_ns if clock_ns is None else clock_ns
         self._wait_timeout = wait_timeout
         self._fps_window_size = fps_window_size
         self._lock = threading.RLock()
@@ -150,7 +151,8 @@ class InferenceWorker:
     def latest_result(self) -> Optional[InferenceResult]:
         """Return the latest completed result, if one exists."""
 
-        return self._latest_result
+        with self._lock:
+            return self._latest_result
 
     def _run(self) -> None:
         try:
