@@ -294,6 +294,141 @@ def test_start_clears_stale_latest_result_for_new_generation(
         worker.stop()
 
 
+def test_start_resets_generation_state_and_fences_cached_frame(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    hub = FrameHub()
+    factory_calls = 0
+    second_factory_started = threading.Event()
+    release_second_factory = threading.Event()
+    clock_values = iter((1_000, 2_000, 3_000, 4_000, 5_000, 6_000))
+
+    def factory(_onnx_path: Path, _report_path: Path) -> FakePredictor:
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 2:
+            second_factory_started.set()
+            assert release_second_factory.wait(2.0)
+        return FakePredictor(fake_contract)
+
+    worker = InferenceWorker(
+        hub,
+        onnx_path=tmp_path / "model.onnx",
+        report_path=tmp_path / "report.json",
+        predictor_factory=factory,
+        clock_ns=lambda: next(clock_values),
+        wait_timeout=0.01,
+        fps_window_size=5,
+    )
+    worker.start()
+    try:
+        _wait_for_state(worker, InferenceState.RUNNING)
+        hub.publish(_frame(1, 1_000))
+        _wait_for_status(worker, lambda status: status["latest_frame_id"] == 1)
+        hub.publish(_frame(2, 2_000))
+        old_status = _wait_for_status(
+            worker,
+            lambda status: status["latest_frame_id"] == 2
+            and status["processed_frames"] == 2,
+        )
+        assert old_status["inference_fps"] is not None
+
+        worker.stop()
+        with worker._lock:
+            worker._last_error = "old generation error"
+        hub.publish(_frame(3, 3_000))
+
+        worker.start()
+        assert second_factory_started.wait(2.0)
+        starting = worker.status()
+        assert starting["state"] == InferenceState.STARTING.value
+        assert starting["latest_frame_id"] is None
+        assert starting["capture_timestamp_ns"] is None
+        assert starting["inference_fps"] is None
+        assert starting["latency_ms"] is None
+        assert starting["detection_count"] is None
+        assert starting["last_error"] is None
+        assert starting["processed_frames"] == 0
+        assert starting["skipped_frames"] == 0
+        assert starting["artifact_name"] is None
+        assert starting["model_sha256"] is None
+        assert starting["confidence_threshold"] is None
+        assert worker._after_frame_id is None
+
+        release_second_factory.set()
+        _wait_for_state(worker, InferenceState.RUNNING)
+        assert worker._after_frame_id == 3
+        hub.publish(_frame(4, 4_000))
+        new_result = _wait_for_latest_result(worker)
+        assert new_result.frame_id == 4
+        assert worker.status()["processed_frames"] == 1
+        assert worker.status()["skipped_frames"] == 0
+        assert factory_calls == 2
+    finally:
+        release_second_factory.set()
+        worker.stop()
+
+
+def test_failed_generation_restarts_only_on_explicit_start(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    hub = FrameHub()
+    factory_calls = 0
+    second_factory_started = threading.Event()
+    release_second_factory = threading.Event()
+    failure_state_visible = threading.Event()
+    release_failure_handler = threading.Event()
+
+    def factory(_onnx_path: Path, _report_path: Path) -> FakePredictor:
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 1:
+            raise RuntimeError("first generation failed")
+        second_factory_started.set()
+        assert release_second_factory.wait(2.0)
+        return FakePredictor(fake_contract)
+
+    worker = _worker(tmp_path, hub, factory)
+    original_set_state = worker._set_state_locked
+
+    def hold_failed_generation(state: InferenceState) -> None:
+        original_set_state(state)
+        if state == InferenceState.FAILED:
+            failure_state_visible.set()
+            worker._lock.release()
+            try:
+                assert release_failure_handler.wait(2.0)
+            finally:
+                worker._lock.acquire()
+
+    worker._set_state_locked = hold_failed_generation  # type: ignore[method-assign]
+    worker.start()
+    first_thread = worker._thread
+    try:
+        assert failure_state_visible.wait(2.0)
+        assert worker.status()["state"] == InferenceState.FAILED.value
+        assert factory_calls == 1
+        assert not second_factory_started.is_set()
+
+        worker.start()
+        assert second_factory_started.wait(2.0)
+        release_failure_handler.set()
+        assert first_thread is not None
+        first_thread.join(2.0)
+        release_second_factory.set()
+        _wait_for_state(worker, InferenceState.RUNNING)
+        hub.publish(_frame(10, 10_000))
+        result = _wait_for_latest_result(worker)
+
+        assert factory_calls == 2
+        assert result.frame_id == 10
+        assert worker.status()["last_error"] is None
+    finally:
+        release_failure_handler.set()
+        release_second_factory.set()
+        worker.stop()
+
+
 def test_worker_fences_cached_frames_after_model_validation(
     tmp_path: Path, fake_contract: SimpleNamespace
 ) -> None:

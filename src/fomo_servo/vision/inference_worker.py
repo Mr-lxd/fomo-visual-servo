@@ -96,6 +96,7 @@ class InferenceWorker:
         self._state_condition = threading.Condition(self._lock)
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._generation = 0
         self._state = InferenceState.DISABLED
         self._identity: Optional[ModelIdentity] = None
         self._last_error: Optional[str] = None
@@ -109,8 +110,14 @@ class InferenceWorker:
         """Start model initialization once, rejecting another live start."""
 
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
+            if (
+                self._thread is not None
+                and self._thread.is_alive()
+                and self._state != InferenceState.FAILED
+            ):
                 raise RuntimeError("inference worker is already running")
+            self._generation += 1
+            generation = self._generation
             self._set_state_locked(InferenceState.STARTING)
             self._identity = None
             self._last_error = None
@@ -122,6 +129,7 @@ class InferenceWorker:
             self._stop_event = threading.Event()
             self._thread = threading.Thread(
                 target=self._run,
+                args=(generation,),
                 name="vision-inference-worker",
                 daemon=True,
             )
@@ -192,7 +200,7 @@ class InferenceWorker:
         self._state = state
         self._state_condition.notify_all()
 
-    def _run(self) -> None:
+    def _run(self, generation: int) -> None:
         try:
             predictor = self._predictor_factory(self._onnx_path, self._report_path)
             contract = getattr(predictor, "contract", None)
@@ -201,7 +209,11 @@ class InferenceWorker:
             after_frame_id = None if cached is None else cached.frame_id
         except Exception as error:
             with self._lock:
+                if generation != self._generation:
+                    return
                 self._set_state_locked(InferenceState.FAILED)
+                if generation != self._generation:
+                    return
                 self._identity = None
                 self._after_frame_id = None
                 self._last_error = str(error) or type(error).__name__
@@ -213,6 +225,8 @@ class InferenceWorker:
             confidence_threshold=contract.confidence_threshold,
         )
         with self._lock:
+            if generation != self._generation:
+                return
             if self._stop_event.is_set():
                 self._set_state_locked(InferenceState.DISABLED)
                 self._identity = None
@@ -244,7 +258,10 @@ class InferenceWorker:
                     detections=tuple(prediction.detections),
                 )
                 with self._lock:
-                    if self._stop_event.is_set():
+                    if (
+                        generation != self._generation
+                        or self._stop_event.is_set()
+                    ):
                         return
                     skipped_frames = max(
                         0,
@@ -261,7 +278,11 @@ class InferenceWorker:
                 after_frame_id = frame.frame_id
             except Exception as error:
                 with self._lock:
+                    if generation != self._generation:
+                        return
                     self._set_state_locked(InferenceState.FAILED)
+                    if generation != self._generation:
+                        return
                     self._last_error = str(error) or type(error).__name__
                 return
 
