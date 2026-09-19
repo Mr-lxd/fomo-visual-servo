@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Optional, Any
+
+from fomo_servo.capture.control import DEFAULT_CONTROL_PORT, VisionControlServer
+from fomo_servo.capture.manager import CaptureConfig, CaptureManager
 
 from .camera_owner import CameraOwner
 from .frame_hub import FrameHub
@@ -29,6 +33,10 @@ class VisionServiceConfig:
     jpeg_quality: int = DEFAULT_JPEG_QUALITY
     send_buffer_bytes: int = DEFAULT_SEND_BUFFER_BYTES
     write_timeout: float = DEFAULT_WRITE_TIMEOUT_SECONDS
+    control_port: int = DEFAULT_CONTROL_PORT
+    capture_output_root: Path = Path("datasets_raw/robobeetle")
+    capture_queue_bytes: int = 64 * 1024 * 1024
+    capture_min_free_bytes: int = 512 * 1024 * 1024
 
 
 class VisionService:
@@ -42,6 +50,13 @@ class VisionService:
     ) -> None:
         self.config = config
         self.hub = FrameHub()
+        self.capture_manager = CaptureManager(
+            CaptureConfig(
+                output_root=config.capture_output_root,
+                max_queue_bytes=config.capture_queue_bytes,
+                min_free_bytes=config.capture_min_free_bytes,
+            )
+        )
         self.camera_owner = CameraOwner(
             self.hub,
             source=config.source,
@@ -50,6 +65,7 @@ class VisionService:
             fps=config.fps,
             fourcc=config.fourcc,
             capture_factory=capture_factory,
+            frame_callback=self.capture_manager.offer_frame,
         )
         self.stream_server = VisionTcpServer(
             self.hub,
@@ -59,6 +75,17 @@ class VisionService:
             send_buffer_bytes=config.send_buffer_bytes,
             write_timeout=config.write_timeout,
         )
+        self.control_server = VisionControlServer(
+            self.capture_manager,
+            self.hub,
+            facts_provider=lambda: self.camera_owner.facts,
+            camera_running=lambda: self.camera_owner.is_running,
+            measured_fps_provider=(
+                lambda: self.camera_owner.measured_capture_fps
+            ),
+            bind_host=config.bind_host,
+            port=config.control_port,
+        )
         self.mode_manager = VisionModeManager(
             self.hub,
             self.camera_owner,
@@ -67,6 +94,23 @@ class VisionService:
 
     def start_live(self) -> None:
         self.mode_manager.set_mode(VisionMode.LIVE)
+        try:
+            self.control_server.start()
+        except BaseException:
+            self.mode_manager.shutdown()
+            raise
 
     def shutdown(self) -> None:
-        self.mode_manager.shutdown()
+        first_error: BaseException | None = None
+        for cleanup in (
+            self.control_server.stop,
+            self.capture_manager.shutdown,
+            self.mode_manager.shutdown,
+        ):
+            try:
+                cleanup()
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error

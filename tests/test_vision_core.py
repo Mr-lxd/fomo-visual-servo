@@ -148,6 +148,24 @@ def test_camera_owner_assigns_ids_and_acquisition_return_timestamps() -> None:
     assert any(prop == cv2.CAP_PROP_FOURCC for prop, _ in capture.set_calls)
 
 
+
+def test_camera_owner_measures_delivered_frame_cadence() -> None:
+    capture = _SequenceCapture([_Image() for _ in range(8)])
+    timestamps = iter(
+        1_000_000_000 + index * 100_000_000
+        for index in range(8)
+    )
+    owner = CameraOwner(
+        _RecordingHub(),  # type: ignore[arg-type]
+        capture_factory=lambda _source: capture,
+        clock_ns=timestamps.__next__,
+    ).start()
+
+    assert owner.finished.wait(timeout=1.0)
+    assert owner.cadence_sample_count == 8
+    assert owner.measured_capture_fps == pytest.approx(10.0)
+
+
 class _BlockingCapture(_SequenceCapture):
     def __init__(self) -> None:
         super().__init__([])
@@ -243,3 +261,56 @@ def test_camera_owner_rejects_requested_image_above_validation_profile_before_op
         owner.start()
 
     assert not factory_called
+
+
+def test_camera_owner_isolates_frame_callback_failure_from_capture_loop() -> None:
+    capture = _SequenceCapture([_Image(), _Image()])
+    hub = _RecordingHub()
+    callback_ids: list[int] = []
+
+    def failing_callback(frame: VisionFrame) -> None:
+        callback_ids.append(frame.frame_id)
+        raise RuntimeError("recorder callback failed")
+
+    owner = CameraOwner(
+        hub,  # type: ignore[arg-type]
+        capture_factory=lambda _source: capture,
+        clock_ns=iter([101, 202]).__next__,
+        frame_callback=failing_callback,
+    ).start()
+
+    assert owner.finished.wait(timeout=1.0)
+    assert callback_ids == [0, 1]
+    assert [frame.frame_id for frame in hub.frames] == [0, 1]
+    assert owner.frames_captured == 2
+    assert owner.frame_callback_errors == 2
+    assert owner.last_frame_callback_error == "recorder callback failed"
+    assert isinstance(owner.error, CameraReadError)
+
+
+def test_camera_owner_measures_delivered_frame_cadence_from_monotonic_timestamps() -> None:
+    frames = [_Image() for _ in range(10)]
+    capture = _SequenceCapture(frames)
+    timestamps = iter(
+        [
+            1_000_000_000,
+            1_100_000_000,
+            1_200_000_000,
+            1_300_000_000,
+            1_400_000_000,
+            1_500_000_000,
+            1_600_000_000,
+            1_700_000_000,
+            1_800_000_000,
+            1_900_000_000,
+        ]
+    )
+    owner = CameraOwner(
+        _RecordingHub(),  # type: ignore[arg-type]
+        capture_factory=lambda _source: capture,
+        clock_ns=timestamps.__next__,
+    ).start()
+
+    assert owner.finished.wait(timeout=1.0)
+    assert owner.cadence_sample_count == 10
+    assert owner.measured_capture_fps == pytest.approx(10.0, rel=1e-6)

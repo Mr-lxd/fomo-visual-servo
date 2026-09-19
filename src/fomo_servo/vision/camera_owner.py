@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -14,6 +15,8 @@ from .frame_hub import FrameHub
 from .protocol import MAX_DECODED_PIXELS, MAX_DIMENSION
 
 _MAX_FRAME_ID = (1 << 64) - 1
+_CADENCE_WINDOW_SIZE = 64
+_MIN_CADENCE_SAMPLES = 8
 
 
 class CameraOwnerError(RuntimeError):
@@ -62,6 +65,7 @@ class CameraOwner:
         fourcc: Optional[str] = None,
         capture_factory: Optional[Callable[[int | str], Any]] = None,
         clock_ns: Callable[[], int] = time.monotonic_ns,
+        frame_callback: Optional[Callable[[VisionFrame], None]] = None,
     ) -> None:
         self._hub = hub
         self._source = source
@@ -71,22 +75,48 @@ class CameraOwner:
         self._requested_fourcc = fourcc
         self._capture_factory = capture_factory or cv2.VideoCapture
         self._clock_ns = clock_ns
+        self._frame_callback = frame_callback
 
         self._capture: Any = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._release_lock = threading.Lock()
         self._released = True
+        self._cadence_lock = threading.Lock()
+        self._capture_timestamps_ns: deque[int] = deque(
+            maxlen=_CADENCE_WINDOW_SIZE
+        )
 
         self.finished = threading.Event()
         self.error: Optional[BaseException] = None
         self.facts: Optional[CameraFacts] = None
         self.frames_captured = 0
+        self.frame_callback_errors = 0
+        self.last_frame_callback_error: Optional[str] = None
 
     @property
     def is_running(self) -> bool:
         thread = self._thread
         return thread is not None and thread.is_alive() and not self.finished.is_set()
+
+    @property
+    def measured_capture_fps(self) -> Optional[float]:
+        """Return recent delivered-frame cadence from Pi monotonic timestamps."""
+
+        with self._cadence_lock:
+            timestamps = tuple(self._capture_timestamps_ns)
+        if len(timestamps) < _MIN_CADENCE_SAMPLES:
+            return None
+        elapsed_ns = timestamps[-1] - timestamps[0]
+        if elapsed_ns <= 0:
+            return None
+        fps = (len(timestamps) - 1) * 1_000_000_000.0 / elapsed_ns
+        return fps if fps > 0.0 else None
+
+    @property
+    def cadence_sample_count(self) -> int:
+        with self._cadence_lock:
+            return len(self._capture_timestamps_ns)
 
     def start(self) -> "CameraOwner":
         """Open/configure the camera synchronously, then start the capture worker."""
@@ -100,6 +130,10 @@ class CameraOwner:
         self.error = None
         self.facts = None
         self.frames_captured = 0
+        self.frame_callback_errors = 0
+        self.last_frame_callback_error = None
+        with self._cadence_lock:
+            self._capture_timestamps_ns.clear()
 
         source_value: int | str = self._source
         if isinstance(source_value, str) and source_value.isdigit():
@@ -176,6 +210,10 @@ class CameraOwner:
                     raise CameraOwnerError(
                         "camera frame must be an HxWx3 BGR image"
                     )
+                with self._cadence_lock:
+                    self._capture_timestamps_ns.append(
+                        capture_timestamp_ns
+                    )
 
                 height = int(shape[0])
                 width = int(shape[1])
@@ -188,6 +226,13 @@ class CameraOwner:
                     image=image,
                 )
                 self._hub.publish(frame)
+                callback = self._frame_callback
+                if callback is not None:
+                    try:
+                        callback(frame)
+                    except BaseException as error:
+                        self.frame_callback_errors += 1
+                        self.last_frame_callback_error = str(error)
                 self.frames_captured += 1
 
                 if frame_id == _MAX_FRAME_ID:

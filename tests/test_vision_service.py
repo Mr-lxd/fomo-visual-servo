@@ -31,9 +31,13 @@ def test_slice1_service_defaults_match_frozen_hardware_target() -> None:
     assert config.jpeg_quality == 80
     assert config.send_buffer_bytes == 64 * 1024
     assert config.write_timeout == 0.5
+    assert config.control_port == 47011
+    assert config.capture_output_root == Path("datasets_raw/robobeetle")
+    assert config.capture_queue_bytes == 64 * 1024 * 1024
+    assert config.capture_min_free_bytes == 512 * 1024 * 1024
 
 
-def test_cli_defaults_map_to_service_config_without_hidden_control_options() -> None:
+def test_cli_defaults_map_to_service_config_with_separate_capture_control() -> None:
     module = _load_script()
     parser = module.build_parser()
     args = parser.parse_args([])
@@ -41,6 +45,10 @@ def test_cli_defaults_map_to_service_config_without_hidden_control_options() -> 
 
     assert config == VisionServiceConfig()
     destinations = {action.dest for action in parser._actions}
+    assert "control_port" in destinations
+    assert "capture_output_root" in destinations
+    assert "capture_queue_mib" in destinations
+    assert "capture_min_free_mib" in destinations
     assert "device" not in destinations
     assert "authority" not in destinations
     assert "rbrp" not in destinations
