@@ -115,7 +115,7 @@ class InferenceWorker:
         with self._lock:
             thread = self._thread
             stop_event = self._stop_event
-        stop_event.set()
+            stop_event.set()
         if thread is not None and thread is not threading.current_thread():
             thread.join()
         with self._lock:

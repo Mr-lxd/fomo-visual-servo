@@ -385,6 +385,21 @@ def test_worker_discards_result_when_stop_requested_before_publish(
     worker.start()
     try:
         _wait_for_state(worker, InferenceState.RUNNING)
+        class TrackingStopEvent(threading.Event):
+            def __init__(self, lock: threading.RLock) -> None:
+                super().__init__()
+                self.set_called = threading.Event()
+                self.set_under_worker_lock = False
+                self._worker_lock = lock
+
+            def set(self) -> None:
+                self.set_under_worker_lock = self._worker_lock._is_owned()
+                self.set_called.set()
+                super().set()
+
+        stop_event = TrackingStopEvent(worker._lock)
+        with worker._lock:
+            worker._stop_event = stop_event
         hub.publish(
             VisionFrame(
                 frame_id=7,
@@ -402,11 +417,13 @@ def test_worker_discards_result_when_stop_requested_before_publish(
             target=lambda: (worker.stop(), stop_finished.set()), daemon=True
         )
         stopper.start()
-        assert worker._stop_event.wait(2.0)
+        assert stop_event.set_called.wait(2.0)
+        assert not predictor_holder[0].release_return.is_set()
         predictor_holder[0].release_return.set()
 
         assert stop_finished.wait(2.0)
         stopper.join(2.0)
+        assert stop_event.set_under_worker_lock
         assert worker.latest_result() is None
     finally:
         predictor = predictor_holder[0] if predictor_holder else None
