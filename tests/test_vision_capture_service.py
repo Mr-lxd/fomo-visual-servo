@@ -269,37 +269,49 @@ def test_async_worker_failure_does_not_roll_back_live_mode(
     worker = _RecordingInferenceWorker.instances[0]
     failure_condition = threading.Condition()
     start_returned = threading.Event()
+    failure_thread: threading.Thread | None = None
 
     def fail_asynchronously() -> None:
+        nonlocal failure_thread
         worker.events.append("inference.start")
+
         def fail_after_start_returns() -> None:
             start_returned.wait()
             with failure_condition:
                 worker.failed = True
                 failure_condition.notify_all()
 
-        worker.failure_thread = threading.Thread(
+        failure_thread = threading.Thread(
             target=fail_after_start_returns,
             name="test-inference-failure",
+            daemon=False,
         )
-        worker.failure_thread.start()
+        failure_thread.start()
 
     worker.start = fail_asynchronously  # type: ignore[method-assign]
 
-    service.start_live()
-    start_returned.set()
-    with failure_condition:
-        assert failure_condition.wait_for(lambda: worker.failed, timeout=1.0)
-    worker.failure_thread.join(timeout=1.0)
+    try:
+        service.start_live()
+        start_returned.set()
+        with failure_condition:
+            assert failure_condition.wait_for(
+                lambda: worker.failed,
+                timeout=1.0,
+            )
 
-    assert worker.failed is True
-    assert service.mode_manager.mode is VisionMode.LIVE
-    assert "mode.shutdown" not in events
-    assert events == [
-        "mode.live",
-        "inference.start",
-        "control.start",
-    ]
+        assert worker.failed is True
+        assert service.mode_manager.mode is VisionMode.LIVE
+        assert "mode.shutdown" not in events
+        assert events == [
+            "mode.live",
+            "inference.start",
+            "control.start",
+        ]
+    finally:
+        start_returned.set()
+        assert failure_thread is not None
+        failure_thread.join(timeout=1.0)
+        assert not failure_thread.is_alive()
 
 
 def test_start_live_is_idempotent_when_mode_is_already_live(
