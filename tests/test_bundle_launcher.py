@@ -142,3 +142,7 @@ def test_repo_launcher_dispatches_vision_live_without_pythonpath() -> None:
     assert "--port" in result.stdout
     assert "--jpeg-quality" in result.stdout
     assert "--write-timeout" in result.stdout
+    assert "--control-port" in result.stdout
+    assert "--capture-output-root" in result.stdout
+    assert "--capture-queue-mib" in result.stdout
+    assert "--capture-min-free-mib" in result.stdout
