@@ -7,6 +7,7 @@ import threading
 import time
 from typing import get_type_hints
 
+import numpy as np
 import pytest
 
 from fomo_servo.postprocess import Detection
@@ -39,6 +40,24 @@ EXPECTED_CONTRACT = {
 class FakePredictor:
     def __init__(self, contract: object) -> None:
         self.contract = contract
+        self.received_images: list[np.ndarray] = []
+
+    def predict_rgb_image(self, image: np.ndarray) -> SimpleNamespace:
+        self.received_images.append(image)
+        detection = Detection(
+            class_id=0,
+            class_name="creature",
+            confidence=0.9,
+            mean_confidence=0.8,
+            component_area_cells=1,
+            heatmap_x=0.5,
+            heatmap_y=0.5,
+            input_x=1.0,
+            input_y=1.0,
+            original_x=1.0,
+            original_y=1.0,
+        )
+        return SimpleNamespace(detections=(detection,))
 
 
 @pytest.fixture
@@ -244,6 +263,58 @@ def test_worker_fences_cached_frames_after_model_validation(
 
     assert worker._after_frame_id == 4
     worker.stop()
+
+
+def test_worker_publishes_rgb_inference_result_bound_to_source_frame(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    hub = FrameHub()
+    source_image = np.array([[[11, 22, 33]]], dtype=np.uint8)
+    source_image_before = source_image.copy()
+    frame = VisionFrame(
+        frame_id=5,
+        capture_timestamp_ns=123456,
+        width=1,
+        height=1,
+        pixel_format=PixelFormat.BGR8,
+        image=source_image,
+    )
+    clock_values = iter((1001, 1002))
+    predictor_holder: list[FakePredictor] = []
+
+    def factory(_onnx_path: Path, _report_path: Path) -> FakePredictor:
+        predictor = FakePredictor(fake_contract)
+        predictor_holder.append(predictor)
+        return predictor
+
+    worker = _worker(tmp_path, hub, factory)
+    worker._clock_ns = lambda: next(clock_values)
+    worker.start()
+    try:
+        _wait_for_state(worker, InferenceState.RUNNING)
+        hub.publish(frame)
+
+        deadline = time.monotonic() + 2.0
+        result = worker.latest_result()
+        while result is None and time.monotonic() < deadline:
+            time.sleep(0.001)
+            result = worker.latest_result()
+
+        assert result is not None
+        assert len(predictor_holder) == 1
+        assert len(predictor_holder[0].received_images) == 1
+        received_rgb = predictor_holder[0].received_images[0]
+        np.testing.assert_array_equal(received_rgb, np.array([[[33, 22, 11]]], dtype=np.uint8))
+        assert received_rgb is not source_image
+        np.testing.assert_array_equal(source_image, source_image_before)
+        assert result.frame_id == frame.frame_id
+        assert result.capture_timestamp_ns == frame.capture_timestamp_ns
+        assert result.inference_started_ns == 1001
+        assert result.inference_finished_ns == 1002
+        assert isinstance(result.detections, tuple)
+        assert isinstance(result.detections[0], Detection)
+    finally:
+        worker.stop()
 
 
 def test_stop_during_factory_initialization_never_publishes_running(

@@ -10,6 +10,8 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
+import cv2
+
 from fomo_servo.inference.ort_predictor import OnnxRuntimePredictor
 from fomo_servo.postprocess import Detection
 
@@ -189,7 +191,27 @@ class InferenceWorker:
             self._after_frame_id = after_frame_id
             self._set_state_locked(InferenceState.RUNNING)
 
-        self._stop_event.wait()
+        while not self._stop_event.is_set():
+            frame = self._hub.wait_for_newer(
+                after_frame_id, timeout=self._wait_timeout
+            )
+            if frame is None:
+                continue
+            started = self._clock_ns()
+            rgb = cv2.cvtColor(frame.image, cv2.COLOR_BGR2RGB)
+            prediction = predictor.predict_rgb_image(rgb)
+            finished = self._clock_ns()
+            result = InferenceResult(
+                frame_id=frame.frame_id,
+                capture_timestamp_ns=frame.capture_timestamp_ns,
+                inference_started_ns=started,
+                inference_finished_ns=finished,
+                detections=tuple(prediction.detections),
+            )
+            with self._lock:
+                self._after_frame_id = frame.frame_id
+                self._latest_result = result
+            after_frame_id = frame.frame_id
 
     @staticmethod
     def _validate_contract(contract: Any) -> None:
