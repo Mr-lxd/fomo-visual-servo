@@ -41,12 +41,13 @@ The existing pipeline remains:
 ```text
 USB UVC camera
     -> CameraOwner
-    -> FrameHub (one replaceable BGR frame)
-         -> LiveStreamConsumer -> RBVS 47010 -> Qt video
-         -> InferenceWorker -> BGR-to-RGB -> OnnxRuntimePredictor
-                              -> existing NumPy postprocess
-                              -> latest InferenceResult
-         -> CaptureManager -> snapshot / bounded sequential recording
+         ├── FrameHub [REALTIME_LATEST]
+         │     ├── LiveStreamConsumer -> RBVS 47010 -> Qt video
+         │     └── InferenceWorker -> BGR-to-RGB -> OnnxRuntimePredictor
+         │                              -> existing NumPy postprocess
+         │                              -> latest InferenceResult
+         └── CaptureManager [SEQUENTIAL_BOUNDED]
+               (CameraOwner.frame_callback -> offer_frame)
 ```
 
 `InferenceWorker` is an independent thread owned by `VisionService`. It never
@@ -69,7 +70,13 @@ thread. The thread loads and validates the predictor through
 `OnnxRuntimePredictor.from_files()`. Only after successful initialization does
 it snapshot the current FrameHub frame ID as the startup floor and transition
 to `running`. Frames already cached while the model initialized are therefore
-not treated as fresh inference input.
+not treated as fresh inference input. Every explicit `stop()` followed by a
+new `start()` begins a new camera generation and resets
+`latest_result`, `processed_frames`, `skipped_frames`, the bounded completion
+timestamp window, `last_error`, and validated model identity before entering
+`starting`; identity remains unset until the new model contract validates.
+This permits an explicit service restart to retry a failed worker, while a
+failed worker never retries automatically in its existing generation.
 
 The loop waits for the newest frame newer than its internal floor, converts the
 source BGR image to a new RGB array with OpenCV, calls
@@ -145,7 +152,18 @@ Artifact identity and threshold are populated only after the model contract is
 validated. Result-specific fields are null until a successful inference has
 been published; frame ID zero is still a valid non-null result. Full
 detections remain internal to `InferenceResult`; no `/inference/latest` route
-or new port is added. Existing capture fields and behavior are unchanged.
+or new port is added. `latency_ms` is explicitly the end-to-end perception
+latency from source capture to completed inference:
+
+```text
+latency_ms =
+    (inference_finished_ns - capture_timestamp_ns) / 1_000_000
+```
+
+It is not the model-only processing duration
+`inference_finished_ns - inference_started_ns`; a future metric for that
+duration would need a separate name. Existing capture fields and behavior are
+unchanged.
 
 ## Qt diagnostics integration
 
