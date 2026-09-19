@@ -154,6 +154,35 @@ def test_worker_initializes_in_worker_thread_and_publishes_running_identity(
     worker.stop()
 
 
+def test_start_clears_stale_latest_result_for_new_generation(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    factory_started = threading.Event()
+    release_factory = threading.Event()
+
+    def blocking_factory(_onnx_path: Path, _report_path: Path) -> FakePredictor:
+        factory_started.set()
+        assert release_factory.wait(2.0)
+        return FakePredictor(fake_contract)
+
+    worker = _worker(tmp_path, FrameHub(), blocking_factory)
+    worker._latest_result = InferenceResult(
+        frame_id=99,
+        capture_timestamp_ns=100,
+        inference_started_ns=101,
+        inference_finished_ns=102,
+        detections=(),
+    )
+    worker.start()
+    try:
+        assert factory_started.wait(2.0)
+        assert worker.status()["state"] == InferenceState.STARTING.value
+        assert worker.latest_result() is None
+    finally:
+        release_factory.set()
+        worker.stop()
+
+
 def test_worker_fences_cached_frames_after_model_validation(
     tmp_path: Path, fake_contract: SimpleNamespace
 ) -> None:

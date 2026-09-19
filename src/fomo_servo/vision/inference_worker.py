@@ -96,6 +96,7 @@ class InferenceWorker:
             self._identity = None
             self._last_error = None
             self._after_frame_id = None
+            self._latest_result = None
             self._stop_event = threading.Event()
             self._thread = threading.Thread(
                 target=self._run,
