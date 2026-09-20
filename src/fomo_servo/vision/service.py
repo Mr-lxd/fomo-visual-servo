@@ -11,6 +11,7 @@ from fomo_servo.capture.manager import CaptureConfig, CaptureManager
 
 from .camera_owner import CameraOwner
 from .frame_hub import FrameHub
+from .inference_control import InferenceActionResult, InferenceControl
 from .inference_worker import InferenceWorker
 from .mode import VisionMode, VisionModeManager
 from .streaming import (
@@ -59,6 +60,7 @@ class VisionService:
             )
 
         self.config = config
+        self._lifecycle_closed = False
         self.hub = FrameHub()
         self.capture_manager = CaptureManager(
             CaptureConfig(
@@ -92,6 +94,16 @@ class VisionService:
             send_buffer_bytes=config.send_buffer_bytes,
             write_timeout=config.write_timeout,
         )
+        self.mode_manager = VisionModeManager(
+            self.hub,
+            self.camera_owner,
+            self.stream_server,
+        )
+        self.inference_control = InferenceControl(
+            self.inference_worker,
+            is_live=lambda: self.mode_manager.mode is VisionMode.LIVE,
+            camera_running=lambda: self.camera_owner.is_running,
+        )
         self.control_server = VisionControlServer(
             self.capture_manager,
             self.hub,
@@ -101,46 +113,49 @@ class VisionService:
                 lambda: self.camera_owner.measured_capture_fps
             ),
             inference_status_provider=self._inference_status,
+            inference_start_callback=self.start_inference,
+            inference_stop_callback=self.stop_inference,
             bind_host=config.bind_host,
             port=config.control_port,
         )
-        self.mode_manager = VisionModeManager(
-            self.hub,
-            self.camera_owner,
-            self.stream_server,
-        )
 
     def _inference_status(self) -> dict:
-        if self.inference_worker is None:
-            return {
-                "state": "disabled",
-                "artifact_name": None,
-                "model_sha256": None,
-                "confidence_threshold": None,
-                "latest_frame_id": None,
-                "capture_timestamp_ns": None,
-                "processed_frames": 0,
-                "skipped_frames": 0,
-                "inference_fps": None,
-                "latency_ms": None,
-                "detection_count": None,
-                "last_error": None,
-            }
-        return self.inference_worker.status()
+        return self.inference_control.status()
+
+    def start_inference(self) -> InferenceActionResult:
+        """Expose manual inference Start/Retry to the HTTP control boundary."""
+
+        return self.inference_control.start_inference()
+
+    def stop_inference(self) -> InferenceActionResult:
+        """Expose manual inference Stop/Clear Error to the HTTP control boundary."""
+
+        return self.inference_control.stop_inference()
 
     def start_live(self) -> None:
+        if self._lifecycle_closed:
+            raise RuntimeError(
+                "VisionService is closed; construct a new VisionService for another lifecycle"
+            )
         if self.mode_manager.mode is VisionMode.LIVE:
             return
-        self.mode_manager.set_mode(VisionMode.LIVE)
         try:
-            if self.inference_worker is not None:
-                self.inference_worker.start()
+            self.mode_manager.set_mode(VisionMode.LIVE)
+            self.inference_control.open_actions()
             self.control_server.start()
         except BaseException as startup_error:
+            self._lifecycle_closed = True
             cleanup_errors: list[BaseException] = []
             try:
-                if self.inference_worker is not None:
-                    self.inference_worker.stop()
+                self.inference_control.begin_shutdown()
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+            try:
+                self.control_server.stop()
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+            try:
+                self.inference_control.finish_shutdown()
             except BaseException as cleanup_error:
                 cleanup_errors.append(cleanup_error)
             try:
@@ -152,13 +167,14 @@ class VisionService:
             raise
 
     def shutdown(self) -> None:
+        self._lifecycle_closed = True
         first_error: BaseException | None = None
         cleanups = [
+            self.inference_control.begin_shutdown,
             self.control_server.stop,
             self.capture_manager.shutdown,
+            self.inference_control.finish_shutdown,
         ]
-        if self.inference_worker is not None:
-            cleanups.append(self.inference_worker.stop)
         cleanups.append(self.mode_manager.shutdown)
         for cleanup in cleanups:
             try:
