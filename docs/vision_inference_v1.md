@@ -13,6 +13,11 @@ The deployment artifact is fixed as follows:
 | --- | --- |
 | artifact identity | `d2_mobilenet_v2_fomo_seed42_epoch40` |
 | ONNX SHA256 | `3dea74511bf2c44844192e75594fd53d4c4ce941f8b53b15767e020832bf9b08` |
+| report SHA256 | `9ef9b98d6692d44d71271764ffcadfcbf24a6e668d8b66b1ffd1b91360845aa0` |
+| fixed postprocess threshold | `0.40` |
+| ONNX input | RGB `float32` `[1, 3, 192, 192]`, normalized to `[0, 1]` |
+| ONNX output | raw logits `float32` `[1, 8, 24, 24]` |
+| ONNX opset | `17` |
 
 The Pi launch must provide both artifact paths as a pair:
 
@@ -37,16 +42,22 @@ disabled -> starting -> running
 
 `failed` reports the initialization or prediction error through status. The
 inference failure is isolated: it does not stop CameraOwner, FrameHub, the
-47010 realtime stream, or the 47011 capture/control server. Inference has its
-own generation. Starting a new generation clears the prior inference result
-and counters, and a stale worker generation cannot publish into the new one.
+47010 realtime stream, or the 47011 capture/control server. A failed worker
+does not retry automatically: it must be stopped so its thread is joined before
+an explicit new `start()` creates a new inference generation; direct `start()`
+from `failed` is rejected. This does not restart CameraOwner. A new inference
+generation clears the prior result,
+counters, completion-time window, error, and validated model identity until
+validation completes; a stale worker generation cannot publish into the new
+one.
 
 The runtime policy is `REALTIME_LATEST`: the worker directly consumes the
 single replaceable latest frame from `FrameHub`. There is no inference FIFO.
 If prediction is busy while newer frames replace the current FrameHub slot,
-those superseded frames are not inferred. `skipped_frames` counts those
-superseded frame IDs between successfully processed frames; it is a latest-only
-freshness metric, not a count of failed predictions.
+those superseded frames are not inferred. `skipped_frames` counts source-frame
+gaps only between successfully published inference results; frames before the
+first successful result do not contribute. It is a latest-only freshness
+metric, not a count of failed predictions.
 
 For each completed prediction:
 
@@ -94,15 +105,51 @@ update while the camera is live. If model initialization or prediction fails,
 confirm `state: "failed"` and `last_error` while the camera/stream/control
 services remain independently usable.
 
-## Targeted regression
+## Final verification — Hardware A-G PASS
 
-The Task 10 regression gate is:
+Final software verification is recorded from the completed Slice 3 gates:
 
-```bash
-python -m pytest -q tests/test_vision_inference_worker.py tests/test_vision_service.py tests/test_capture_control.py tests/test_vision_capture_service.py tests/test_bundle_launcher.py tests/test_onnx_runtime_predictor.py
-```
+- Focused Vision suites: `80 passed`.
+- `tests/test_onnx_runtime_predictor.py` in the existing `fomo-servo-train`
+  environment: `18 passed`.
+- Complete six-file fomo gate in the same environment: `98 passed`.
+- RoboBeetle targeted Windows CTest: `4/4` passed.
+- `git diff --check`: PASS.
 
-Fresh result in the Task 10 worktree: pytest interrupted during collection
-with `1 error` because `tests/test_onnx_runtime_predictor.py` imports missing
-package `torch` (`ModuleNotFoundError: No module named 'torch'`). No warning
-summary was emitted; no test cases ran before collection was interrupted.
+The Pi runtime intentionally does **not** require `torch` or PyYAML. Hardware
+preflight found and fixed the deployment import closure so the Vision/ONNX
+Runtime path does not eagerly import training or configuration dependencies.
+The accepted Raspberry Pi environment was aarch64 with Python `3.13.5`, NumPy
+`2.5.2`, OpenCV `5.0.0`, and ONNX Runtime `1.29.0`; `CPUExecutionProvider` was
+available and selected explicitly. PyYAML and `torch` were absent, while the
+Vision ONNX Runtime import closure succeeded.
+
+Hardware acceptance A-G passed:
+
+| Gate | Accepted evidence |
+| --- | --- |
+| A — Formal model identity | The frozen artifact, report hash, threshold, tensor contract, and opset matched this document. |
+| B — Sole CameraOwner | Exactly one process owned `/dev/video0`; inference did not open a second `VideoCapture`. |
+| C — `REALTIME_LATEST` | Inference consumed `FrameHub` directly with no FIFO or stale-inference backlog. No FPS threshold is asserted. |
+| D — LIVE + inference | TCP `47010` remained LIVE while inference diagnostics updated on `47011`. |
+| E — LIVE + Capture + inference | Snapshot and sequential recording continued alongside inference; sequential recording frames were verified. |
+| F — inference failure isolation | An inference initialization error left camera, LIVE, capture, and HTTP usable; Qt displayed Inference Error. |
+| G — clean shutdown/restart | A new inference generation cleared stale result and model-generation state without capture-state leakage. |
+
+The observed runtime surface stayed bounded: `47010` remained the LIVE stream,
+`47011` remained the existing status/capture plane, no service listened on
+`47012`, and `/api/v1/vision/inference/latest` returned `404`. The reported
+model identity, SHA256, and threshold matched the frozen contract. Qt exposes
+diagnostics only: it remains compatible with legacy Slice 2 `GET` responses,
+and capture `POST` action responses without inference preserve the prior
+inference UI state.
+
+## Authoritative merged baseline
+
+Vision Inference v1 was merged with the following authoritative baselines.
+These commits are the completed Slice 3 integration baselines:
+
+| Repository | Pull request | Merged `main` commit |
+| --- | --- | --- |
+| fomo-visual-servo | [PR #5](https://github.com/Mr-lxd/fomo-visual-servo/pull/5) | `649cb9a238a2aee75423b5f09aeaffdaff8ac9f7` |
+| RoboBeetle | [PR #32](https://github.com/Mr-lxd/RoboBeetle/pull/32) | `c06dd44419c9b56dd97c6424d1b3b555f5697453` |
