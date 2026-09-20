@@ -369,13 +369,68 @@ def test_start_resets_generation_state_and_fences_cached_frame(
         worker.stop()
 
 
-def test_failed_generation_restarts_only_on_explicit_start(
+def test_worker_skipped_frames_start_after_first_successful_result(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    class GatedFirstWaitFrameHub(FrameHub):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_wait_started = threading.Event()
+            self.release_first_wait = threading.Event()
+            self._gate_first_wait = True
+
+        def wait_for_newer(self, *args: object, **kwargs: object):
+            if self._gate_first_wait:
+                self._gate_first_wait = False
+                self.first_wait_started.set()
+                assert self.release_first_wait.wait(2.0)
+            return super().wait_for_newer(*args, **kwargs)
+
+    hub = GatedFirstWaitFrameHub()
+    hub.publish(_frame(100, 1_000))
+    predictor_holder: list[FakePredictor] = []
+
+    def factory(_onnx_path: Path, _report_path: Path) -> FakePredictor:
+        predictor = FakePredictor(fake_contract)
+        predictor_holder.append(predictor)
+        return predictor
+
+    worker = _worker(tmp_path, hub, factory)
+    worker.start()
+    try:
+        _wait_for_state(worker, InferenceState.RUNNING)
+        assert hub.first_wait_started.wait(2.0)
+
+        for frame_id in (101, 102, 103, 104):
+            hub.publish(_frame(frame_id, frame_id * 1_000))
+        hub.release_first_wait.set()
+
+        first = _wait_for_status(
+            worker,
+            lambda status: status["latest_frame_id"] == 104
+            and status["processed_frames"] == 1,
+        )
+        assert first["skipped_frames"] == 0
+        assert predictor_holder[0].received_images[-1][0, 0, 2] == 104
+
+        hub.publish(_frame(107, 107_000))
+        second = _wait_for_status(
+            worker,
+            lambda status: status["latest_frame_id"] == 107
+            and status["processed_frames"] == 2,
+        )
+        assert second["skipped_frames"] == 2
+        assert predictor_holder[0].received_images[-1][0, 0, 2] == 107
+    finally:
+        hub.release_first_wait.set()
+        worker.stop()
+
+
+def test_failed_generation_rejects_start_before_and_after_thread_unwinds(
     tmp_path: Path, fake_contract: SimpleNamespace
 ) -> None:
     hub = FrameHub()
     factory_calls = 0
-    second_factory_started = threading.Event()
-    release_second_factory = threading.Event()
     failure_state_visible = threading.Event()
     release_failure_handler = threading.Event()
 
@@ -384,8 +439,6 @@ def test_failed_generation_restarts_only_on_explicit_start(
         factory_calls += 1
         if factory_calls == 1:
             raise RuntimeError("first generation failed")
-        second_factory_started.set()
-        assert release_second_factory.wait(2.0)
         return FakePredictor(fake_contract)
 
     worker = _worker(tmp_path, hub, factory)
@@ -408,23 +461,102 @@ def test_failed_generation_restarts_only_on_explicit_start(
         assert failure_state_visible.wait(2.0)
         assert worker.status()["state"] == InferenceState.FAILED.value
         assert factory_calls == 1
-        assert not second_factory_started.is_set()
 
-        worker.start()
-        assert second_factory_started.wait(2.0)
+        with pytest.raises(RuntimeError, match="failed generation must be stopped"):
+            worker.start()
+        assert factory_calls == 1
+
         release_failure_handler.set()
         assert first_thread is not None
         first_thread.join(2.0)
-        release_second_factory.set()
-        _wait_for_state(worker, InferenceState.RUNNING)
-        hub.publish(_frame(10, 10_000))
-        result = _wait_for_latest_result(worker)
 
-        assert factory_calls == 2
-        assert result.frame_id == 10
-        assert worker.status()["last_error"] is None
+        with pytest.raises(RuntimeError, match="failed generation must be stopped"):
+            worker.start()
+        assert factory_calls == 1
     finally:
         release_failure_handler.set()
+        worker.stop()
+
+
+def test_stop_failed_generation_preserves_diagnostic_and_allows_clean_retry(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    hub = FrameHub()
+    factory_calls = 0
+    second_factory_started = threading.Event()
+    release_second_factory = threading.Event()
+
+    class FailOnSecondPrediction(FakePredictor):
+        def __init__(self, contract: object) -> None:
+            super().__init__(contract)
+            self.prediction_count = 0
+
+        def predict_rgb_image(self, image: np.ndarray) -> SimpleNamespace:
+            self.prediction_count += 1
+            if self.prediction_count == 2:
+                raise RuntimeError("retryable predictor boom")
+            return super().predict_rgb_image(image)
+
+    def factory(_onnx_path: Path, _report_path: Path) -> FakePredictor:
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 1:
+            return FailOnSecondPrediction(fake_contract)
+        second_factory_started.set()
+        assert release_second_factory.wait(2.0)
+        return FakePredictor(fake_contract)
+
+    worker = _worker(tmp_path, hub, factory)
+    worker.start()
+    try:
+        _wait_for_state(worker, InferenceState.RUNNING)
+        hub.publish(_frame(1, 1_000))
+        _wait_for_latest_result(worker)
+        hub.publish(_frame(2, 2_000))
+        failed = _wait_for_status(
+            worker,
+            lambda status: status["state"] == InferenceState.FAILED.value
+            and status["last_error"] == "retryable predictor boom",
+        )
+        failed_thread = worker._thread
+        assert failed["latest_frame_id"] == 1
+        assert failed["processed_frames"] == 1
+        assert failed["skipped_frames"] == 0
+        assert failed["inference_fps"] is None
+        assert failed["artifact_name"] == EXPECTED_CONTRACT["artifact_name"]
+        assert factory_calls == 1
+
+        worker.stop()
+
+        preserved = worker.status()
+        assert failed_thread is not None
+        assert not failed_thread.is_alive()
+        assert worker._thread is None
+        assert preserved["state"] == InferenceState.FAILED.value
+        assert preserved["last_error"] == "retryable predictor boom"
+        assert preserved["latest_frame_id"] == 1
+        assert preserved["processed_frames"] == 1
+
+        worker.start()
+        assert second_factory_started.wait(2.0)
+        starting = worker.status()
+        assert starting["state"] == InferenceState.STARTING.value
+        assert starting["latest_frame_id"] is None
+        assert starting["capture_timestamp_ns"] is None
+        assert starting["inference_fps"] is None
+        assert starting["latency_ms"] is None
+        assert starting["detection_count"] is None
+        assert starting["last_error"] is None
+        assert starting["processed_frames"] == 0
+        assert starting["skipped_frames"] == 0
+        assert starting["artifact_name"] is None
+        assert starting["model_sha256"] is None
+        assert starting["confidence_threshold"] is None
+
+        release_second_factory.set()
+        _wait_for_state(worker, InferenceState.RUNNING)
+        assert factory_calls == 2
+    finally:
         release_second_factory.set()
         worker.stop()
 

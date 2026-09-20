@@ -110,12 +110,13 @@ class InferenceWorker:
         """Start model initialization once, rejecting another live start."""
 
         with self._lock:
-            if (
-                self._thread is not None
-                and self._thread.is_alive()
-                and self._state != InferenceState.FAILED
-            ):
-                raise RuntimeError("inference worker is already running")
+            if self._thread is not None:
+                if self._state == InferenceState.FAILED:
+                    raise RuntimeError(
+                        "failed generation must be stopped before restart"
+                    )
+                if self._thread.is_alive():
+                    raise RuntimeError("inference worker is already running")
             self._generation += 1
             generation = self._generation
             self._set_state_locked(InferenceState.STARTING)
@@ -148,12 +149,13 @@ class InferenceWorker:
             if (
                 thread is not None
                 and self._thread is thread
-                and self._state != InferenceState.FAILED
             ):
-                self._set_state_locked(InferenceState.DISABLED)
-                self._identity = None
-                self._last_error = None
-                self._after_frame_id = None
+                self._thread = None
+                if self._state != InferenceState.FAILED:
+                    self._set_state_locked(InferenceState.DISABLED)
+                    self._identity = None
+                    self._last_error = None
+                    self._after_frame_id = None
 
     def status(self) -> dict[str, Any]:
         """Return the lifecycle snapshot and validated model identity."""
@@ -237,6 +239,7 @@ class InferenceWorker:
             self._after_frame_id = after_frame_id
             self._set_state_locked(InferenceState.RUNNING)
 
+        previous_successful_frame_id: Optional[int] = None
         while not self._stop_event.is_set():
             try:
                 frame = self._hub.wait_for_newer(
@@ -265,8 +268,8 @@ class InferenceWorker:
                         return
                     skipped_frames = max(
                         0,
-                        frame.frame_id - after_frame_id - 1
-                        if after_frame_id is not None
+                        frame.frame_id - previous_successful_frame_id - 1
+                        if previous_successful_frame_id is not None
                         else 0,
                     )
                     self._after_frame_id = frame.frame_id
@@ -275,6 +278,7 @@ class InferenceWorker:
                     self._skipped_frames += skipped_frames
                     self._completion_timestamps_ns.append(finished)
                     self._state_condition.notify_all()
+                previous_successful_frame_id = frame.frame_id
                 after_frame_id = frame.frame_id
             except Exception as error:
                 with self._lock:
