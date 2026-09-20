@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.request
 from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
+import fomo_servo.vision.service as service_module
+from fomo_servo.vision.mode import VisionMode
 from fomo_servo.vision.service import VisionService, VisionServiceConfig
 
 
@@ -64,6 +68,587 @@ def _json_request(port: int, path: str, method: str = "GET") -> dict:
     with urllib.request.urlopen(request, timeout=2.0) as response:
         assert response.status == 200
         return json.loads(response.read())
+
+
+class _RecordingInferenceWorker:
+    instances: list["_RecordingInferenceWorker"] = []
+    event_log: list[str] = []
+
+    def __init__(self, hub, onnx_path, report_path) -> None:
+        self.events = type(self).event_log
+        self.onnx_path = onnx_path
+        self.report_path = report_path
+        self.failed = False
+        self.stop_count = 0
+        self.stop_error: BaseException | None = None
+        type(self).instances.append(self)
+
+    def start(self) -> None:
+        self.events.append("inference.start")
+
+    def status(self) -> dict:
+        return {
+            "state": "running",
+            "artifact_name": "recording-model",
+            "model_sha256": "b" * 64,
+            "confidence_threshold": 0.4,
+            "latest_frame_id": None,
+            "capture_timestamp_ns": None,
+            "processed_frames": 0,
+            "skipped_frames": 0,
+            "inference_fps": None,
+            "latency_ms": None,
+            "detection_count": None,
+            "last_error": None,
+        }
+
+    def stop(self) -> None:
+        self.stop_count += 1
+        self.events.append("inference.stop")
+        if self.stop_error is not None:
+            raise self.stop_error
+
+
+class _RecordingModeManager:
+    def __init__(
+        self,
+        events: list[str],
+        shutdown_error: BaseException | None = None,
+    ) -> None:
+        self.events = events
+        self.mode = VisionMode.OFF
+        self.shutdown_error = shutdown_error
+        self.shutdown_count = 0
+
+    def set_mode(self, mode: VisionMode) -> None:
+        self.events.append(f"mode.{mode.value}")
+        self.mode = mode
+
+    def shutdown(self) -> None:
+        self.shutdown_count += 1
+        self.events.append("mode.shutdown")
+        self.mode = VisionMode.OFF
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
+
+
+class _RecordingControlServer:
+    def __init__(self, events: list[str], error: BaseException | None = None) -> None:
+        self.events = events
+        self.error = error
+
+    def start(self) -> None:
+        self.events.append("control.start")
+        if self.error is not None:
+            raise self.error
+
+    def stop(self) -> None:
+        self.events.append("control.stop")
+
+
+class _RecordingCaptureManager:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+
+    def shutdown(self) -> None:
+        self.events.append("capture.shutdown")
+
+
+def _service_with_lifecycle_doubles(
+    monkeypatch,
+    tmp_path: Path,
+    events: list[str],
+    *,
+    control_error: BaseException | None = None,
+    mode_error: BaseException | None = None,
+) -> VisionService:
+    _RecordingInferenceWorker.instances.clear()
+    _RecordingInferenceWorker.event_log = events
+    monkeypatch.setattr(
+        service_module,
+        "InferenceWorker",
+        _RecordingInferenceWorker,
+    )
+    service = VisionService(
+        VisionServiceConfig(
+            inference_onnx=tmp_path / "model.onnx",
+            inference_report=tmp_path / "report.json",
+            capture_output_root=tmp_path,
+            capture_min_free_bytes=0,
+        )
+    )
+    service.mode_manager = _RecordingModeManager(
+        events,
+        shutdown_error=mode_error,
+    )
+    service.control_server = _RecordingControlServer(
+        events,
+        error=control_error,
+    )
+    service.capture_manager = _RecordingCaptureManager(events)
+    return service
+
+
+@pytest.mark.parametrize(
+    "config_kwargs",
+    [
+        {"inference_onnx": Path("model.onnx")},
+        {"inference_report": Path("report.json")},
+    ],
+)
+def test_inference_paths_must_be_supplied_as_a_pair_before_camera_start(
+    monkeypatch,
+    config_kwargs: dict[str, Path],
+) -> None:
+    camera_starts: list[str] = []
+
+    class _CameraOwnerThatMustNotStart:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            camera_starts.append("camera.start")
+
+    monkeypatch.setattr(
+        service_module,
+        "CameraOwner",
+        _CameraOwnerThatMustNotStart,
+    )
+
+    with pytest.raises(ValueError, match="inference_onnx and inference_report"):
+        VisionService(VisionServiceConfig(**config_kwargs))
+
+    assert camera_starts == []
+
+
+def test_inference_worker_is_not_constructed_when_inference_is_disabled(
+    monkeypatch,
+) -> None:
+    _RecordingInferenceWorker.instances.clear()
+    monkeypatch.setattr(
+        service_module,
+        "InferenceWorker",
+        _RecordingInferenceWorker,
+    )
+
+    VisionService(VisionServiceConfig())
+
+    assert _RecordingInferenceWorker.instances == []
+
+
+def test_configured_inference_constructs_exactly_one_worker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _RecordingInferenceWorker.instances.clear()
+    monkeypatch.setattr(
+        service_module,
+        "InferenceWorker",
+        _RecordingInferenceWorker,
+    )
+
+    VisionService(
+        VisionServiceConfig(
+            inference_onnx=tmp_path / "model.onnx",
+            inference_report=tmp_path / "report.json",
+        )
+    )
+
+    assert len(_RecordingInferenceWorker.instances) == 1
+    worker = _RecordingInferenceWorker.instances[0]
+    assert worker.onnx_path == tmp_path / "model.onnx"
+    assert worker.report_path == tmp_path / "report.json"
+
+
+def test_disabled_inference_is_exposed_in_service_status(tmp_path: Path) -> None:
+    service = VisionService(
+        VisionServiceConfig(
+            control_port=0,
+            capture_output_root=tmp_path,
+            capture_min_free_bytes=0,
+        )
+    )
+
+    status = service.control_server._status_payload()
+
+    assert status["inference"] == {
+        "state": "disabled",
+        "artifact_name": None,
+        "model_sha256": None,
+        "confidence_threshold": None,
+        "latest_frame_id": None,
+        "capture_timestamp_ns": None,
+        "processed_frames": 0,
+        "skipped_frames": 0,
+        "inference_fps": None,
+        "latency_ms": None,
+        "detection_count": None,
+        "last_error": None,
+    }
+
+
+def test_configured_inference_status_is_read_from_single_worker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _RecordingInferenceWorker.instances.clear()
+    monkeypatch.setattr(
+        service_module,
+        "InferenceWorker",
+        _RecordingInferenceWorker,
+    )
+
+    service = VisionService(
+        VisionServiceConfig(
+            inference_onnx=tmp_path / "model.onnx",
+            inference_report=tmp_path / "report.json",
+            control_port=0,
+            capture_output_root=tmp_path,
+            capture_min_free_bytes=0,
+        )
+    )
+
+    status = service.control_server._status_payload()
+
+    assert status["inference"] == _RecordingInferenceWorker.instances[0].status()
+    assert len(_RecordingInferenceWorker.instances) == 1
+
+
+def _write_valid_looking_report(report_path: Path, model_name: str) -> None:
+    report_path.write_text(
+        json.dumps(
+            {
+                "artifact_name": "d2_mobilenet_v2_fomo_seed42_epoch40",
+                "source_experiment_config": "config.yaml",
+                "source_experiment_config_sha256": "c" * 64,
+                "export_config_file": "export.yaml",
+                "export_config_sha256": "d" * 64,
+                "checkpoint_file": "checkpoint.pt",
+                "checkpoint_sha256": "e" * 64,
+                "epoch": 40,
+                "seed": 42,
+                "parameter_count": 1,
+                "config_fingerprint": "f" * 64,
+                "validation_threshold": 0.4,
+                "validation_threshold_usage": "provenance_only_raw_logits_export",
+                "onnx_file": model_name,
+                "onnx_sha256": "3dea74511bf2c44844192e75594fd53d4c4ce941f8b53b15767e020832bf9b08",
+                "onnx_size_bytes": 1,
+                "onnx_checker": "passed",
+                "onnx_opset": 17,
+                "input_name": "images",
+                "input_shape": [1, 3, 192, 192],
+                "input_dtype": "float32",
+                "input_color_order": "RGB",
+                "input_value_range": [0.0, 1.0],
+                "output_name": "output",
+                "output_shape": [1, 8, 24, 24],
+                "output_dtype": "float32",
+                "output_semantic": "raw_logits",
+                "output_stride": 8,
+                "class_names": [
+                    "fish_tuna",
+                    "jellyfish",
+                    "class_2",
+                    "class_3",
+                    "class_4",
+                    "class_5",
+                    "class_6",
+                ],
+                "postprocess": {
+                    "class_thresholds": [0.4] * 7,
+                    "component_mode": "connected_components",
+                    "confidence_mode": "max",
+                    "selection_strategy": "highest_confidence",
+                    "allowed_class_ids": None,
+                    "confidence_threshold": 0.4,
+                    "max_match_distance_pixels": 1.0,
+                    "max_lost_frames": 0,
+                },
+                "pytorch_version": "test",
+                "onnx_version": "test",
+                "onnxruntime_version": "test",
+                "exported_at_utc": "test",
+                "parity": {
+                    "passed": True,
+                    "input_seed": 42,
+                    "rtol": 0.0,
+                    "atol": 0.0,
+                    "max_absolute_error": 0.0,
+                    "mean_absolute_error": 0.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("artifact_kind", ["missing", "invalid"])
+def test_invalid_inference_artifact_fails_without_rolling_back_live_service(
+    tmp_path: Path,
+    artifact_kind: str,
+) -> None:
+    capture = _LiveCapture()
+    model_path = tmp_path / "model.onnx"
+    report_path = tmp_path / "report.json"
+    _write_valid_looking_report(report_path, model_path.name)
+    if artifact_kind == "invalid":
+        model_path.write_bytes(b"not an ONNX model")
+
+    service = VisionService(
+        VisionServiceConfig(
+            width=4,
+            height=3,
+            fps=25.0,
+            port=0,
+            control_port=0,
+            capture_output_root=tmp_path,
+            capture_min_free_bytes=0,
+            inference_onnx=model_path,
+            inference_report=report_path,
+        ),
+        capture_factory=lambda _source: capture,
+    )
+
+    try:
+        service.start_live()
+        assert service.mode_manager.mode is VisionMode.LIVE
+        assert service.camera_owner.is_running
+        control_port = service.control_server.bound_port
+        assert control_port is not None
+
+        deadline = time.monotonic() + 2.0
+        failed_status = None
+        while time.monotonic() < deadline:
+            status = _json_request(control_port, "/api/v1/vision/status")
+            if status["inference"]["state"] == "failed":
+                failed_status = status
+                break
+        assert failed_status is not None
+        assert set(failed_status["inference"]) == {
+            "state",
+            "artifact_name",
+            "model_sha256",
+            "confidence_threshold",
+            "latest_frame_id",
+            "capture_timestamp_ns",
+            "processed_frames",
+            "skipped_frames",
+            "inference_fps",
+            "latency_ms",
+            "detection_count",
+            "last_error",
+        }
+        assert failed_status["inference"]["last_error"]
+        assert failed_status["inference"]["artifact_name"] is None
+        assert failed_status["inference"]["model_sha256"] is None
+        assert failed_status["inference"]["confidence_threshold"] is None
+        assert failed_status["inference"]["latest_frame_id"] is None
+        assert failed_status["inference"]["capture_timestamp_ns"] is None
+        assert failed_status["inference"]["processed_frames"] == 0
+        assert failed_status["inference"]["skipped_frames"] == 0
+        assert failed_status["inference"]["inference_fps"] is None
+        assert failed_status["inference"]["latency_ms"] is None
+        assert failed_status["inference"]["detection_count"] is None
+        assert failed_status["camera"]["running"] is True
+        assert service.mode_manager.mode is VisionMode.LIVE
+
+        snapshot = _json_request(
+            control_port,
+            "/api/v1/vision/snapshot",
+            method="POST",
+        )
+        assert snapshot["ok"] is True
+    finally:
+        service.shutdown()
+
+
+def test_start_live_orders_mode_worker_then_control(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    service = _service_with_lifecycle_doubles(monkeypatch, tmp_path, events)
+
+    service.start_live()
+
+    assert events == [
+        "mode.live",
+        "inference.start",
+        "control.start",
+    ]
+
+
+def test_async_worker_failure_does_not_roll_back_live_mode(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    service = _service_with_lifecycle_doubles(monkeypatch, tmp_path, events)
+    worker = _RecordingInferenceWorker.instances[0]
+    failure_condition = threading.Condition()
+    start_returned = threading.Event()
+    failure_thread: threading.Thread | None = None
+
+    def fail_asynchronously() -> None:
+        nonlocal failure_thread
+        worker.events.append("inference.start")
+
+        def fail_after_start_returns() -> None:
+            start_returned.wait()
+            with failure_condition:
+                worker.failed = True
+                failure_condition.notify_all()
+
+        failure_thread = threading.Thread(
+            target=fail_after_start_returns,
+            name="test-inference-failure",
+            daemon=False,
+        )
+        failure_thread.start()
+
+    worker.start = fail_asynchronously  # type: ignore[method-assign]
+
+    try:
+        service.start_live()
+        start_returned.set()
+        with failure_condition:
+            assert failure_condition.wait_for(
+                lambda: worker.failed,
+                timeout=1.0,
+            )
+
+        assert worker.failed is True
+        assert service.mode_manager.mode is VisionMode.LIVE
+        assert "mode.shutdown" not in events
+        assert events == [
+            "mode.live",
+            "inference.start",
+            "control.start",
+        ]
+    finally:
+        start_returned.set()
+        assert failure_thread is not None
+        failure_thread.join(timeout=1.0)
+        assert not failure_thread.is_alive()
+
+
+def test_start_live_is_idempotent_when_mode_is_already_live(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    service = _service_with_lifecycle_doubles(monkeypatch, tmp_path, events)
+
+    service.start_live()
+    service.start_live()
+
+    assert events == [
+        "mode.live",
+        "inference.start",
+        "control.start",
+    ]
+
+
+def test_control_start_failure_rolls_back_mode_and_worker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    service = _service_with_lifecycle_doubles(
+        monkeypatch,
+        tmp_path,
+        events,
+        control_error=RuntimeError("control start failed"),
+    )
+    worker = _RecordingInferenceWorker.instances[0]
+
+    with pytest.raises(RuntimeError, match="control start failed"):
+        service.start_live()
+
+    assert worker.stop_count == 1
+    assert events == [
+        "mode.live",
+        "inference.start",
+        "control.start",
+        "inference.stop",
+        "mode.shutdown",
+    ]
+
+
+def test_control_start_failure_preserves_original_when_worker_cleanup_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    service = _service_with_lifecycle_doubles(
+        monkeypatch,
+        tmp_path,
+        events,
+        control_error=RuntimeError("control start failed"),
+    )
+    worker = _RecordingInferenceWorker.instances[0]
+    worker.stop_error = RuntimeError("worker stop failed")
+
+    with pytest.raises(RuntimeError, match="control start failed"):
+        service.start_live()
+
+    assert worker.stop_count == 1
+    assert events == [
+        "mode.live",
+        "inference.start",
+        "control.start",
+        "inference.stop",
+        "mode.shutdown",
+    ]
+
+
+def test_control_start_failure_preserves_original_when_mode_rollback_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    service = _service_with_lifecycle_doubles(
+        monkeypatch,
+        tmp_path,
+        events,
+        control_error=RuntimeError("control start failed"),
+        mode_error=RuntimeError("mode shutdown failed"),
+    )
+    worker = _RecordingInferenceWorker.instances[0]
+
+    with pytest.raises(RuntimeError, match="control start failed"):
+        service.start_live()
+
+    assert worker.stop_count == 1
+    assert service.mode_manager.shutdown_count == 1
+    assert events == [
+        "mode.live",
+        "inference.start",
+        "control.start",
+        "inference.stop",
+        "mode.shutdown",
+    ]
+
+
+def test_shutdown_orders_control_capture_worker_then_mode(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    service = _service_with_lifecycle_doubles(monkeypatch, tmp_path, events)
+    worker = _RecordingInferenceWorker.instances[0]
+    events.clear()
+
+    service.shutdown()
+
+    assert worker.stop_count == 1
+    assert events == [
+        "control.stop",
+        "capture.shutdown",
+        "inference.stop",
+        "mode.shutdown",
+    ]
 def test_service_snapshot_reuses_single_camera_owner(tmp_path: Path) -> None:
     capture = _LiveCapture()
     factory_calls = 0

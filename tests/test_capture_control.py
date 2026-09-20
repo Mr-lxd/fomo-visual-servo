@@ -120,6 +120,105 @@ def test_status_and_recording_actions_use_capture_control_only() -> None:
         server.stop()
 
 
+def test_status_includes_exact_inference_fields_from_optional_provider() -> None:
+    manager = _Manager()
+    expected = {
+        "state": "running",
+        "artifact_name": "model",
+        "model_sha256": "a" * 64,
+        "confidence_threshold": 0.4,
+        "latest_frame_id": 7,
+        "capture_timestamp_ns": 107,
+        "processed_frames": 3,
+        "skipped_frames": 1,
+        "inference_fps": 2.5,
+        "latency_ms": 12.0,
+        "detection_count": 2,
+        "last_error": None,
+    }
+    server = VisionControlServer(
+        manager,  # type: ignore[arg-type]
+        FrameHub(),
+        facts_provider=_facts,
+        camera_running=lambda: True,
+        measured_fps_provider=lambda: None,
+        inference_status_provider=lambda: expected,
+        bind_host="127.0.0.1",
+        port=0,
+    ).start()
+    assert server.bound_port is not None
+
+    try:
+        code, payload = _request(
+            server.bound_port,
+            "/api/v1/vision/status",
+        )
+        assert code == 200
+        assert payload["inference"] == expected
+        assert set(payload["inference"]) == {
+            "state",
+            "artifact_name",
+            "model_sha256",
+            "confidence_threshold",
+            "latest_frame_id",
+            "capture_timestamp_ns",
+            "processed_frames",
+            "skipped_frames",
+            "inference_fps",
+            "latency_ms",
+            "detection_count",
+            "last_error",
+        }
+    finally:
+        server.stop()
+
+
+def test_legacy_status_omits_inference_without_provider() -> None:
+    server = VisionControlServer(
+        _Manager(),  # type: ignore[arg-type]
+        FrameHub(),
+        facts_provider=_facts,
+        camera_running=lambda: True,
+        measured_fps_provider=lambda: None,
+        bind_host="127.0.0.1",
+        port=0,
+    ).start()
+    assert server.bound_port is not None
+
+    try:
+        code, payload = _request(
+            server.bound_port,
+            "/api/v1/vision/status",
+        )
+        assert code == 200
+        assert "inference" not in payload
+    finally:
+        server.stop()
+
+
+def test_latest_inference_endpoint_remains_not_found() -> None:
+    server = VisionControlServer(
+        _Manager(),  # type: ignore[arg-type]
+        FrameHub(),
+        facts_provider=_facts,
+        camera_running=lambda: True,
+        measured_fps_provider=lambda: None,
+        bind_host="127.0.0.1",
+        port=0,
+    ).start()
+    assert server.bound_port is not None
+
+    try:
+        code, payload = _request(
+            server.bound_port,
+            "/api/v1/vision/inference/latest",
+        )
+        assert code == 404
+        assert payload == {"ok": False, "error": "not_found"}
+    finally:
+        server.stop()
+
+
 def test_snapshot_waits_for_frame_newer_than_request_floor() -> None:
     manager = _Manager()
     hub = FrameHub()

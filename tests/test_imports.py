@@ -151,3 +151,55 @@ def test_ort_numpy_postprocess_modules_never_probe_torch_on_import() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_vision_ort_runtime_import_closure_does_not_require_yaml_or_torch() -> None:
+    """The Pi Vision/ORT path must not load training or YAML dependencies."""
+
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(root / "src")
+    script = "\n".join(
+        (
+            "import sys",
+            "sys.modules['yaml'] = None",
+            "sys.modules['torch'] = None",
+            "from fomo_servo.vision.service import VisionService, VisionServiceConfig",
+            "from fomo_servo.inference import OnnxRuntimePredictor",
+            "from fomo_servo.inference.ort_predictor import OnnxRuntimePredictor as DirectOnnxRuntimePredictor",
+            "assert VisionService is not None",
+            "assert VisionServiceConfig is not None",
+            "assert OnnxRuntimePredictor is DirectOnnxRuntimePredictor",
+            "assert 'fomo_servo.config' not in sys.modules",
+            "assert 'fomo_servo.inference.predictor' not in sys.modules",
+            "print('PI_IMPORT_CLOSURE_OK')",
+        )
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "PI_IMPORT_CLOSURE_OK"
+
+
+def test_root_config_exports_remain_available_on_demand() -> None:
+    """Root config exports stay compatible after the deployment import split."""
+
+    from fomo_servo import (
+        ConfigurationError,
+        ProjectConfig,
+        TrainingConfig,
+        load_config,
+    )
+
+    assert issubclass(ConfigurationError, ValueError)
+    assert ProjectConfig.__name__ == "ProjectConfig"
+    assert TrainingConfig.__name__ == "TrainingConfig"
+    assert callable(load_config)
