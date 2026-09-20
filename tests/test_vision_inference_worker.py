@@ -1149,3 +1149,145 @@ def test_worker_rejects_each_mismatched_contract_field(
     assert failed["model_sha256"] is None
     assert failed["confidence_threshold"] is None
     worker.stop()
+
+
+def test_request_stop_is_idempotent_non_joining_and_keeps_active_handle(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    factory_started = threading.Event()
+    release_factory = threading.Event()
+
+    def blocking_factory(_onnx_path: Path, _report_path: Path) -> FakePredictor:
+        factory_started.set()
+        assert release_factory.wait(2.0)
+        return FakePredictor(fake_contract)
+
+    worker = _worker(tmp_path, FrameHub(), blocking_factory)
+    worker.start()
+    try:
+        assert factory_started.wait(2.0)
+        thread = worker._thread
+        assert thread is not None and thread.is_alive()
+
+        worker.request_stop()
+        worker.request_stop()
+
+        assert worker._stop_event.is_set()
+        assert worker._thread is thread
+        assert thread.is_alive()
+        assert worker.status()["state"] == InferenceState.STARTING.value
+    finally:
+        release_factory.set()
+        worker.stop()
+
+
+def test_reset_disabled_requires_stop_to_release_handle_then_clears_metrics(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    hub = FrameHub()
+    worker = _worker(
+        tmp_path,
+        hub,
+        lambda *_args: FakePredictor(fake_contract),
+    )
+    worker.start()
+    try:
+        _wait_for_state(worker, InferenceState.RUNNING)
+        hub.publish(_frame(1, 1_000))
+        _wait_for_latest_result(worker)
+        assert worker._after_frame_id == 1
+        assert worker._completion_timestamps_ns
+
+        with pytest.raises(RuntimeError, match=r"stop\(\) has released"):
+            worker.reset_disabled()
+
+        worker.stop()
+        assert worker._thread is None
+        worker.reset_disabled()
+
+        assert worker.latest_result() is None
+        assert worker._after_frame_id is None
+        assert not worker._completion_timestamps_ns
+        assert worker.status() == {
+            "state": "disabled",
+            "artifact_name": None,
+            "model_sha256": None,
+            "confidence_threshold": None,
+            "latest_frame_id": None,
+            "capture_timestamp_ns": None,
+            "inference_fps": None,
+            "latency_ms": None,
+            "detection_count": None,
+            "last_error": None,
+            "processed_frames": 0,
+            "skipped_frames": 0,
+        }
+    finally:
+        worker.stop()
+
+
+def test_thread_start_failure_rolls_back_false_starting_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = _worker(
+        tmp_path,
+        FrameHub(),
+        lambda *_args: pytest.fail("predictor factory must not run"),
+    )
+
+    def fail_thread_start(_thread: threading.Thread) -> None:
+        raise RuntimeError("worker thread start failed")
+
+    monkeypatch.setattr(threading.Thread, "start", fail_thread_start)
+
+    with pytest.raises(RuntimeError, match="worker thread start failed"):
+        worker.start()
+
+    status = worker.status()
+    assert worker._thread is None
+    assert status["state"] == InferenceState.FAILED.value
+    assert status["last_error"] == "worker thread start failed"
+
+
+def test_ten_controlled_start_stop_cycles_have_no_generation_result_or_counter_leak(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    hub = FrameHub()
+    factory_calls = 0
+
+    def factory(_onnx_path: Path, _report_path: Path) -> FakePredictor:
+        nonlocal factory_calls
+        factory_calls += 1
+        return FakePredictor(fake_contract)
+
+    worker = _worker(tmp_path, hub, factory)
+    for generation in range(1, 11):
+        worker.start()
+        _wait_for_state(worker, InferenceState.RUNNING)
+        frame_id = generation * 10
+        hub.publish(_frame(frame_id, frame_id * 1_000))
+        result = _wait_for_latest_result(worker)
+        assert result.frame_id == frame_id
+        assert worker.status()["processed_frames"] == 1
+
+        worker.request_stop()
+        worker.stop()
+        worker.reset_disabled()
+
+        assert worker.latest_result() is None
+        assert worker.status() == {
+            "state": "disabled",
+            "artifact_name": None,
+            "model_sha256": None,
+            "confidence_threshold": None,
+            "latest_frame_id": None,
+            "capture_timestamp_ns": None,
+            "inference_fps": None,
+            "latency_ms": None,
+            "detection_count": None,
+            "last_error": None,
+            "processed_frames": 0,
+            "skipped_frames": 0,
+        }
+
+    assert factory_calls == 10

@@ -134,15 +134,30 @@ class InferenceWorker:
                 name="vision-inference-worker",
                 daemon=True,
             )
-            self._thread.start()
+            thread = self._thread
+            try:
+                thread.start()
+            except BaseException as error:
+                if self._thread is thread:
+                    self._thread = None
+                    self._set_state_locked(InferenceState.FAILED)
+                    self._identity = None
+                    self._after_frame_id = None
+                    self._last_error = str(error) or type(error).__name__
+                raise
+
+    def request_stop(self) -> None:
+        """Request a worker stop without joining or clearing its generation."""
+
+        with self._lock:
+            self._stop_event.set()
 
     def stop(self) -> None:
         """Request shutdown and join the current worker thread."""
 
+        self.request_stop()
         with self._lock:
             thread = self._thread
-            stop_event = self._stop_event
-            stop_event.set()
         if thread is not None and thread is not threading.current_thread():
             thread.join()
         with self._lock:
@@ -156,6 +171,23 @@ class InferenceWorker:
                     self._identity = None
                     self._last_error = None
                     self._after_frame_id = None
+
+    def reset_disabled(self) -> None:
+        """Clear completed-generation diagnostics after ``stop()`` released it."""
+
+        with self._lock:
+            if self._thread is not None:
+                raise RuntimeError(
+                    "reset_disabled requires stop() has released worker thread handle"
+                )
+            self._identity = None
+            self._last_error = None
+            self._after_frame_id = None
+            self._latest_result = None
+            self._processed_frames = 0
+            self._skipped_frames = 0
+            self._completion_timestamps_ns.clear()
+            self._set_state_locked(InferenceState.DISABLED)
 
     def status(self) -> dict[str, Any]:
         """Return the lifecycle snapshot and validated model identity."""
