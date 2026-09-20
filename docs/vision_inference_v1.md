@@ -143,3 +143,13 @@ model identity, SHA256, and threshold matched the frozen contract. Qt exposes
 diagnostics only: it remains compatible with legacy Slice 2 `GET` responses,
 and capture `POST` action responses without inference preserve the prior
 inference UI state.
+
+## Authoritative merged baseline
+
+Vision Inference v1 was merged with the following authoritative baselines.
+These commits are the completed Slice 3 integration baselines:
+
+| Repository | Pull request | Merged `main` commit |
+| --- | --- | --- |
+| fomo-visual-servo | [PR #5](https://github.com/Mr-lxd/fomo-visual-servo/pull/5) | `649cb9a238a2aee75423b5f09aeaffdaff8ac9f7` |
+| RoboBeetle | [PR #32](https://github.com/Mr-lxd/RoboBeetle/pull/32) | `c06dd44419c9b56dd97c6424d1b3b555f5697453` |

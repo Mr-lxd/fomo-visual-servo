@@ -64,8 +64,16 @@ override or a temporary machine-specific path:
 ```bash
 python run.py vision_live \
   --source /dev/video0 \
-  --inference-onnx <path-to-deployed-model.onnx> \
-  --inference-report <path-to-deployed-model.onnx.json>
+  --width 640 \
+  --height 480 \
+  --fps 25 \
+  --fourcc YUYV \
+  --bind 0.0.0.0 \
+  --port 47010 \
+  --control-port 47011 \
+  --capture-output-root datasets_raw/robobeetle \
+  --inference-onnx <formal-model.onnx> \
+  --inference-report <formal-model.onnx.json>
 ```
 
 ## Verification record
