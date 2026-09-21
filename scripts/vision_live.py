@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--send-buffer-bytes", type=int, default=64 * 1024)
     parser.add_argument("--write-timeout", type=float, default=0.5)
     parser.add_argument("--control-port", type=int, default=47011)
+    parser.add_argument("--detection-port", type=int, default=47012)
     parser.add_argument(
         "--capture-output-root",
         type=Path,
@@ -58,6 +59,7 @@ def service_config_from_args(args: argparse.Namespace) -> VisionServiceConfig:
         send_buffer_bytes=args.send_buffer_bytes,
         write_timeout=args.write_timeout,
         control_port=args.control_port,
+        detection_port=args.detection_port,
         capture_output_root=args.capture_output_root,
         capture_queue_bytes=args.capture_queue_mib * 1024 * 1024,
         capture_min_free_bytes=args.capture_min_free_mib * 1024 * 1024,
@@ -85,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         facts = service.camera_owner.facts
         logging.info(
             "Vision LIVE started source=%s observed=%sx%s fps=%s fourcc=%s "
-            "stream=%s:%s control=%s:%s capture_root=%s",
+            "stream=%s:%s control=%s:%s detections=%s:%s capture_root=%s",
             args.source,
             None if facts is None else facts.observed_width,
             None if facts is None else facts.observed_height,
@@ -95,10 +97,13 @@ def main(argv: list[str] | None = None) -> int:
             service.stream_server.bound_port,
             args.bind,
             service.control_server.bound_port,
+            args.bind,
+            service.detection_server.bound_port,
             args.capture_output_root,
         )
 
         next_diagnostics = time.monotonic() + 2.0
+        reported_detection_error: BaseException | None = None
         while True:
             if service.camera_owner.finished.wait(timeout=0.5):
                 error = service.camera_owner.error
@@ -114,6 +119,16 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuntimeError(
                     f"Vision control server stopped: {control_error}"
                 ) from control_error
+            detection_error = service.detection_server.last_error
+            if (
+                detection_error is not None
+                and detection_error is not reported_detection_error
+            ):
+                logging.warning(
+                    "Detection metadata server stopped; video/control remain live: %s",
+                    detection_error,
+                )
+                reported_detection_error = detection_error
 
             now = time.monotonic()
             if now < next_diagnostics:
@@ -128,11 +143,15 @@ def main(argv: list[str] | None = None) -> int:
             encoded_bytes = 0 if metrics is None else metrics.encoded_bytes
             average_jpeg = 0 if sent == 0 else encoded_bytes // sent
             capture = service.capture_manager.status()
+            detection_metrics = service.detection_server.last_metrics
+            detection_sent = (
+                0 if detection_metrics is None else detection_metrics.sent_results
+            )
             logging.info(
                 "Vision diag captured=%s latest_frame_id=%s measured_fps=%s "
                 "client=%s selected=%s sent=%s skipped_ids=%s "
-                "avg_jpeg_bytes=%s capture_state=%s recorded=%s "
-                "snapshots=%s queue_bytes=%s",
+                "avg_jpeg_bytes=%s detection_client=%s detection_results=%s "
+                "capture_state=%s recorded=%s snapshots=%s queue_bytes=%s",
                 service.camera_owner.frames_captured,
                 None if latest is None else latest.frame_id,
                 service.camera_owner.measured_capture_fps,
@@ -141,6 +160,8 @@ def main(argv: list[str] | None = None) -> int:
                 sent,
                 skipped,
                 average_jpeg,
+                service.detection_server.client_connected.is_set(),
+                detection_sent,
                 capture["state"],
                 capture["recorded_frames"],
                 capture["snapshot_count"],

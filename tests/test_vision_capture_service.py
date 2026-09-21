@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 from types import SimpleNamespace
@@ -131,12 +132,15 @@ def _live_service_with_fake_inference_worker(
 ) -> tuple[VisionService, _LiveCapture, list[InferenceWorker]]:
     workers: list[InferenceWorker] = []
 
-    def worker_factory(hub, onnx_path, report_path) -> InferenceWorker:
+    def worker_factory(
+        hub, onnx_path, report_path, *, result_sink=None
+    ) -> InferenceWorker:
         worker = InferenceWorker(
             hub,
             onnx_path,
             report_path,
             predictor_factory=predictor_factory,
+            result_sink=result_sink,
             wait_timeout=0.01,
         )
         workers.append(worker)
@@ -155,6 +159,7 @@ def _live_service_with_fake_inference_worker(
             fps=25.0,
             port=0,
             control_port=0,
+            detection_port=0,
             capture_output_root=tmp_path,
             capture_min_free_bytes=0,
             inference_onnx=tmp_path / "model.onnx",
@@ -170,11 +175,12 @@ class _RecordingInferenceWorker:
     instances: list["_RecordingInferenceWorker"] = []
     event_log: list[str] = []
 
-    def __init__(self, hub, onnx_path, report_path) -> None:
+    def __init__(self, hub, onnx_path, report_path, *, result_sink=None) -> None:
         self.events = type(self).event_log
         self.onnx_path = onnx_path
         self.report_path = report_path
         self.failed = False
+        self.result_sink = result_sink
         self.state = "disabled"
         self.stop_count = 0
         self.request_stop_count = 0
@@ -265,6 +271,32 @@ class _RecordingCaptureManager:
         self.events.append("capture.shutdown")
 
 
+class _RecordingDetectionServer:
+    def __init__(
+        self,
+        events: list[str],
+        error: BaseException | None = None,
+    ) -> None:
+        self.events = events
+        self.error = error
+        self.bound_port: int | None = None
+        self.start_count = 0
+        self.stop_count = 0
+
+    def start(self) -> "_RecordingDetectionServer":
+        self.start_count += 1
+        self.events.append("detection.start")
+        if self.error is not None:
+            raise self.error
+        self.bound_port = 47012
+        return self
+
+    def stop(self) -> None:
+        self.stop_count += 1
+        self.events.append("detection.stop")
+        self.bound_port = None
+
+
 class _RecordingCameraOwner:
     @property
     def is_running(self) -> bool:
@@ -290,6 +322,7 @@ def _service_with_lifecycle_doubles(
         VisionServiceConfig(
             inference_onnx=tmp_path / "model.onnx",
             inference_report=tmp_path / "report.json",
+            detection_port=0,
             capture_output_root=tmp_path,
             capture_min_free_bytes=0,
         )
@@ -392,6 +425,9 @@ def test_disabled_inference_is_exposed_in_service_status(tmp_path: Path) -> None
     assert status["inference"] == {
         "configured": False,
         "control_supported": True,
+        "detection_stream_supported": True,
+        "detection_stream_port": 47012,
+        "detection_stream_version": 1,
         "operation": None,
         "state": "disabled",
         "artifact_name": None,
@@ -435,6 +471,9 @@ def test_configured_inference_status_is_read_from_single_worker(
         **_RecordingInferenceWorker.instances[0].status(),
         "configured": True,
         "control_supported": True,
+        "detection_stream_supported": True,
+        "detection_stream_port": 47012,
+        "detection_stream_version": 1,
         "operation": None,
     }
     assert len(_RecordingInferenceWorker.instances) == 1
@@ -453,6 +492,9 @@ def test_configured_service_stays_disabled_until_manual_start(
     assert service._inference_status() == {
         "configured": True,
         "control_supported": True,
+        "detection_stream_supported": True,
+        "detection_stream_port": service.detection_server.bound_port,
+        "detection_stream_version": 1,
         "operation": None,
         "state": "disabled",
         "artifact_name": None,
@@ -558,6 +600,74 @@ def test_configured_service_stays_disabled_until_http_start_and_factory_runs_onc
     assert capture.release_count == 1
     assert capture.factory_calls == 1
     assert factory_calls == 1
+
+
+def test_live_service_streams_metadata_for_exact_inference_source_frame(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FirstThenBlockPredictor(_ServicePredictor):
+        def __init__(self) -> None:
+            super().__init__(SimpleNamespace(**_INFERENCE_CONTRACT))
+            self.calls = 0
+            self.second_started = threading.Event()
+            self.release_second = threading.Event()
+
+        def predict_rgb_image(self, _image: np.ndarray) -> SimpleNamespace:
+            self.calls += 1
+            if self.calls == 2:
+                self.second_started.set()
+                assert self.release_second.wait(2.0)
+            return SimpleNamespace(detections=())
+
+    predictor = FirstThenBlockPredictor()
+    service, _capture, workers = _live_service_with_fake_inference_worker(
+        monkeypatch,
+        tmp_path,
+        lambda _onnx, _report: predictor,
+    )
+    worker = workers[0]
+    client: socket.socket | None = None
+    try:
+        service.start_live()
+        detection_port = service.detection_server.bound_port
+        assert detection_port is not None
+        client = socket.create_connection(
+            ("127.0.0.1", detection_port),
+            timeout=1.0,
+        )
+        assert service.detection_server.client_connected.wait(timeout=1.0)
+
+        accepted = service.start_inference()
+        assert accepted.http_status == 202
+        with worker._state_condition:
+            assert worker._state_condition.wait_for(
+                lambda: worker.latest_result() is not None,
+                timeout=2.0,
+            )
+
+        client.settimeout(2.0)
+        raw = bytearray()
+        while not raw.endswith(b"\n"):
+            chunk = client.recv(4096)
+            assert chunk
+            raw.extend(chunk)
+        metadata = json.loads(raw)
+
+        result = worker.latest_result()
+        assert result is not None
+        assert metadata["frame_id"] == result.frame_id
+        assert metadata["capture_timestamp_ns"] == result.capture_timestamp_ns
+        assert metadata["width"] == result.frame_width == 4
+        assert metadata["height"] == result.frame_height == 3
+        assert metadata["coordinate_space"] == "original_frame_pixels"
+        assert metadata["detections"] == []
+        assert predictor.second_started.wait(timeout=2.0)
+    finally:
+        predictor.release_second.set()
+        if client is not None:
+            client.close()
+        service.shutdown()
 
 
 def test_unconfigured_service_http_actions_keep_camera_and_capture_available(
@@ -864,6 +974,9 @@ def test_invalid_inference_artifact_fails_only_after_manual_start_and_keeps_live
         assert set(failed_status["inference"]) == {
             "configured",
             "control_supported",
+            "detection_stream_supported",
+            "detection_stream_port",
+            "detection_stream_version",
             "operation",
             "state",
             "artifact_name",
@@ -914,6 +1027,65 @@ def test_start_live_orders_mode_then_control_without_auto_start(
     assert events == [
         "mode.live",
         "control.start",
+    ]
+
+
+def test_detection_server_lifecycle_is_explicit_and_independent(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    service = _service_with_lifecycle_doubles(monkeypatch, tmp_path, events)
+    detection = _RecordingDetectionServer(events)
+    service.detection_server = detection  # type: ignore[assignment]
+
+    service.start_live()
+    assert events == [
+        "mode.live",
+        "detection.start",
+        "control.start",
+    ]
+    assert detection.start_count == 1
+    assert detection.bound_port == 47012
+
+    events.clear()
+    service.shutdown()
+
+    assert detection.stop_count == 1
+    assert "detection.stop" in events
+    assert events.index("control.stop") < events.index("detection.stop")
+    assert events.index("detection.stop") < events.index("capture.shutdown")
+    assert detection.bound_port is None
+
+
+def test_detection_start_failure_rolls_back_live_service(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    service = _service_with_lifecycle_doubles(monkeypatch, tmp_path, events)
+    detection = _RecordingDetectionServer(
+        events,
+        error=RuntimeError("detection start failed"),
+    )
+    service.detection_server = detection  # type: ignore[assignment]
+    worker = _RecordingInferenceWorker.instances[0]
+
+    with pytest.raises(RuntimeError, match="detection start failed"):
+        service.start_live()
+
+    assert worker.stop_count == 1
+    assert detection.start_count == 1
+    assert detection.stop_count == 1
+    assert events == [
+        "mode.live",
+        "detection.start",
+        "inference.request_stop",
+        "control.stop",
+        "detection.stop",
+        "inference.request_stop",
+        "inference.stop",
+        "mode.shutdown",
     ]
 
 

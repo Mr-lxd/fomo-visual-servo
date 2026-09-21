@@ -11,7 +11,13 @@ from fomo_servo.capture.manager import CaptureConfig, CaptureManager
 
 from .camera_owner import CameraOwner
 from .frame_hub import FrameHub
+from .detection_streaming import (
+    DEFAULT_DETECTION_PORT,
+    DETECTION_STREAM_VERSION,
+    DetectionTcpServer,
+)
 from .inference_control import InferenceActionResult, InferenceControl
+from .inference_result_hub import InferenceResultHub
 from .inference_worker import InferenceWorker
 from .mode import VisionMode, VisionModeManager
 from .streaming import (
@@ -36,6 +42,7 @@ class VisionServiceConfig:
     send_buffer_bytes: int = DEFAULT_SEND_BUFFER_BYTES
     write_timeout: float = DEFAULT_WRITE_TIMEOUT_SECONDS
     control_port: int = DEFAULT_CONTROL_PORT
+    detection_port: int = DEFAULT_DETECTION_PORT
     capture_output_root: Path = Path("datasets_raw/robobeetle")
     capture_queue_bytes: int = 64 * 1024 * 1024
     capture_min_free_bytes: int = 512 * 1024 * 1024
@@ -79,12 +86,14 @@ class VisionService:
             capture_factory=capture_factory,
             frame_callback=self.capture_manager.offer_frame,
         )
+        self.inference_results = InferenceResultHub()
         self.inference_worker: InferenceWorker | None = None
         if onnx_configured and report_configured:
             self.inference_worker = InferenceWorker(
                 self.hub,
                 config.inference_onnx,
                 config.inference_report,
+                result_sink=self.inference_results.publish,
             )
         self.stream_server = VisionTcpServer(
             self.hub,
@@ -93,6 +102,11 @@ class VisionService:
             jpeg_quality=config.jpeg_quality,
             send_buffer_bytes=config.send_buffer_bytes,
             write_timeout=config.write_timeout,
+        )
+        self.detection_server = DetectionTcpServer(
+            self.inference_results,
+            bind_host=config.bind_host,
+            port=config.detection_port,
         )
         self.mode_manager = VisionModeManager(
             self.hub,
@@ -120,7 +134,17 @@ class VisionService:
         )
 
     def _inference_status(self) -> dict:
-        return self.inference_control.status()
+        status = self.inference_control.status()
+        status["detection_stream_supported"] = (
+            self.detection_server.last_error is None
+        )
+        status["detection_stream_port"] = (
+            self.detection_server.bound_port
+            if self.detection_server.bound_port is not None
+            else self.config.detection_port
+        )
+        status["detection_stream_version"] = DETECTION_STREAM_VERSION
+        return status
 
     def start_inference(self) -> InferenceActionResult:
         """Expose manual inference Start/Retry to the HTTP control boundary."""
@@ -141,6 +165,7 @@ class VisionService:
             return
         try:
             self.mode_manager.set_mode(VisionMode.LIVE)
+            self.detection_server.start()
             self.inference_control.open_actions()
             self.control_server.start()
         except BaseException as startup_error:
@@ -152,6 +177,10 @@ class VisionService:
                 cleanup_errors.append(cleanup_error)
             try:
                 self.control_server.stop()
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+            try:
+                self.detection_server.stop()
             except BaseException as cleanup_error:
                 cleanup_errors.append(cleanup_error)
             try:
@@ -172,6 +201,7 @@ class VisionService:
         cleanups = [
             self.inference_control.begin_shutdown,
             self.control_server.stop,
+            self.detection_server.stop,
             self.capture_manager.shutdown,
             self.inference_control.finish_shutdown,
         ]

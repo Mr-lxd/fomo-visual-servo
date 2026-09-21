@@ -226,7 +226,7 @@ def test_tcp_server_reconnect_never_replays_cached_preconnection_frame() -> None
         first.settimeout(0.05)
         try:
             first.recv(1)
-        except TimeoutError:
+        except (TimeoutError, socket.timeout):
             pass
         else:
             raise AssertionError("cached frame 5 must not replay on first accept")
@@ -246,7 +246,7 @@ def test_tcp_server_reconnect_never_replays_cached_preconnection_frame() -> None
         second.settimeout(0.05)
         try:
             second.recv(1)
-        except TimeoutError:
+        except (TimeoutError, socket.timeout):
             pass
         else:
             raise AssertionError("cached frame 10 must not replay after reconnect")

@@ -46,6 +46,8 @@ class InferenceResult:
     inference_started_ns: int
     inference_finished_ns: int
     latency_ms: float
+    frame_width: int
+    frame_height: int
     model_identity: ModelIdentity
     detections: tuple[Detection, ...]
 
@@ -78,6 +80,7 @@ class InferenceWorker:
         *,
         predictor_factory: Optional[Callable[..., Any]] = None,
         clock_ns: Optional[Callable[[], int]] = None,
+        result_sink: Optional[Callable[[InferenceResult], None]] = None,
         wait_timeout: float = 0.5,
         fps_window_size: int = 30,
     ) -> None:
@@ -90,6 +93,7 @@ class InferenceWorker:
             else predictor_factory
         )
         self._clock_ns = time.monotonic_ns if clock_ns is None else clock_ns
+        self._result_sink = result_sink
         self._wait_timeout = wait_timeout
         self._fps_window_size = fps_window_size
         self._lock = threading.RLock()
@@ -289,6 +293,8 @@ class InferenceWorker:
                     inference_started_ns=started,
                     inference_finished_ns=finished,
                     latency_ms=(finished - frame.capture_timestamp_ns) / 1_000_000.0,
+                    frame_width=frame.width,
+                    frame_height=frame.height,
                     model_identity=model_identity,
                     detections=tuple(prediction.detections),
                 )
@@ -310,6 +316,8 @@ class InferenceWorker:
                     self._skipped_frames += skipped_frames
                     self._completion_timestamps_ns.append(finished)
                     self._state_condition.notify_all()
+                if self._result_sink is not None:
+                    self._result_sink(result)
                 previous_successful_frame_id = frame.frame_id
                 after_frame_id = frame.frame_id
             except Exception as error:

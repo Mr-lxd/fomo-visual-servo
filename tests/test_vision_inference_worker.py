@@ -149,6 +149,8 @@ def test_inference_result_is_frozen_and_reuses_detection_type() -> None:
         inference_started_ns=110,
         inference_finished_ns=120,
         latency_ms=0.00002,
+        frame_width=640,
+        frame_height=480,
         model_identity=EXPECTED_MODEL_IDENTITY,
         detections=(),
     )
@@ -281,6 +283,8 @@ def test_start_clears_stale_latest_result_for_new_generation(
         inference_started_ns=101,
         inference_finished_ns=102,
         latency_ms=0.000002,
+        frame_width=640,
+        frame_height=480,
         model_identity=EXPECTED_MODEL_IDENTITY,
         detections=(),
     )
@@ -1052,6 +1056,40 @@ def test_worker_missing_model_failure_is_terminal_without_framehub_activity(
         ]
         assert hub.snapshot_calls == 0
         assert hub.wait_calls == 0
+    finally:
+        worker.stop()
+
+
+def test_successful_result_is_published_once_to_optional_result_sink(
+    tmp_path: Path, fake_contract: SimpleNamespace
+) -> None:
+    hub = FrameHub()
+    published: list[InferenceResult] = []
+    worker = InferenceWorker(
+        hub,
+        onnx_path=tmp_path / "model.onnx",
+        report_path=tmp_path / "report.json",
+        predictor_factory=lambda _onnx, _report: FakePredictor(fake_contract),
+        result_sink=published.append,
+        clock_ns=iter((2_000, 3_000)).__next__,
+        wait_timeout=0.01,
+        fps_window_size=5,
+    )
+
+    worker.start()
+    try:
+        _wait_for_state(worker, InferenceState.RUNNING)
+        hub.publish(_frame(7, 1_000))
+        result = _wait_for_latest_result(worker)
+        deadline = time.monotonic() + 1.0
+        while not published and time.monotonic() < deadline:
+            time.sleep(0.002)
+
+        assert published == [result]
+        assert result.frame_id == 7
+        assert result.frame_width == 1
+        assert result.frame_height == 1
+        assert worker.latest_result() is result
     finally:
         worker.stop()
 
