@@ -1,4 +1,6 @@
-# Slice 5 Plan — Frame-Synchronized Detection Text Overlay
+# Slice 5 Plan — Detection Text Overlay
+
+## Repository / branch
 
 Base `fomo-visual-servo` main:
 
@@ -8,137 +10,156 @@ Working branch:
 
 `chatgpt/slice5-detection-text-overlay`
 
-## Phase A — Pi metadata boundary
+## Phase A — Pi detection metadata boundary
 
-### A01 — Inference result geometry
+### A01 — Immutable result geometry
 
-Extend `InferenceResult` with source frame width/height and an optional result sink.
+Extend `InferenceResult` with source frame width/height and an optional
+`result_sink`.
 
 Acceptance:
-- width/height equal the processed CameraOwner frame
-- one sink publication per successful result
-- manual lifecycle semantics unchanged
+
+- width/height equal the CameraOwner frame processed by inference
+- sink receives exactly one completed successful result
+- worker disabled/starting/running/failed lifecycle is unchanged
+- manual stop/retry behavior is unchanged
 
 ### A02 — Latest-only result hub
 
 Add `InferenceResultHub`.
 
 Acceptance:
+
 - starts empty
-- snapshot is non-blocking
-- waits only for a newer frame ID
+- `snapshot()` is non-blocking
+- waiter wakes only for a newer frame ID
 - duplicate/regressing frame IDs fail
 - negative timeout fails
-- no queue/backlog
+- no FIFO/backlog
 
 ### A03 — Detection metadata codec
 
-Add NDJSON v1 encoder.
+Add bounded NDJSON v1 encoder.
 
 Acceptance:
+
 - exact source frame ID/timestamp/dimensions
-- `original_frame_pixels` coordinate space
-- class ID/name/confidence/original centroid only
-- empty detections valid
-- no bbox/marker/heatmap/input coordinates
+- coordinate space is `original_frame_pixels`
+- only class ID/name/confidence/original centroid crosses the wire
+- empty detections is valid
+- no bbox/visual-marker/heatmap/input-coordinate fields
 - finite/range validation
-- <=256 detections
-- <=128 UTF-8 bytes per class name
-- <=64 KiB record
+- at most 256 detections
+- at most 128 UTF-8 bytes per class name
+- at most 64 KiB per line
 
 ### A04 — Detection TCP server
 
-Default port 47012, one viewer, server-to-client only.
+Add one-client server-to-client stream on default port 47012.
 
 Acceptance:
-- no cached preconnection replay
-- latest-only under slow sender
-- send timeout ends viewer without retry queue
-- unexpected inbound bytes close viewer
-- invalid configuration rejected before listen
-- server errors remain visible
+
+- cached preconnection result is not replayed
+- reconnect does not replay stale metadata
+- newest-only behavior under a slow sender
+- send timeout ends only the current viewer
+- unexpected client bytes close only the metadata session
+- invalid port/buffer/timeout is rejected before listening
+- asynchronous metadata-server failure is visible but does not stop 47010/47011
 
 ### A05 — Service composition
 
-Wire `InferenceWorker -> InferenceResultHub -> DetectionTcpServer`.
+Wire:
+
+`InferenceWorker -> InferenceResultHub -> DetectionTcpServer`
 
 Acceptance:
-- 47010 RBVS v1 unchanged
-- 47011 existing routes unchanged
-- 47012 starts/stops with Vision service
+
+- 47010 remains RBVS v1 unchanged
+- 47011 routes remain unchanged
+- 47012 starts/stops with the Vision service
 - inference still starts disabled
-- status advertises supported/actual bound port/version
-- detection start failure rolls back LIVE startup
-- result received on 47012 has the exact source frame ID from the worker
-- no robot/RBRP/STM32 dependency
+- metadata server may be connected while inference is disabled and simply stays idle
+- status advertises support / actual bound port / version
+- startup bind/configuration failure rolls back cleanly
+- runtime metadata failure is non-fatal to video/control
+- no Robot/RBRP/STM32 dependency
 
 ### A06 — Validation
 
-Required runtime tests:
-- `tests/test_detection_streaming.py`
-- `tests/test_inference_result_hub.py`
-- all `tests/test_vision_*.py`
+Required:
+
+- focused Vision/inference/detection pytest
+- full repository pytest using the existing `fomo-servo-train` Python 3.10 env
 - `git diff --check`
-- `compileall` for Vision runtime
+- Raspberry Pi smoke:
+  - 47010, 47011 and 47012 listen
+  - inference initially disabled
+  - Start -> metadata records
+  - Stop -> inference disabled
+  - video/control stay available
+  - leave inference disabled
 
-Complete repository pytest also runs in the normal Windows PyTorch training
-environment. A minimal runtime environment without `torch` may fail training-test
-collection and must report that as an environment limitation rather than installing
-training dependencies into the Pi/runtime environment.
+## Phase B — Qt metadata client
 
-## Phase B — Qt exact-frame synchronization
-
-Begin only after RoboBeetle PR #34 is merged.
+Begin only after RoboBeetle Task 03 / PR #34 is merged.
 
 ### B01 — Capability parsing
 
-Parse optional:
-- `detection_stream_supported`
-- `detection_stream_port`
-- `detection_stream_version`
+Extend `VisionControlClient` with optional:
 
-Only a fresh 47011 status may enable the metadata connection. Missing fields mean
-unsupported/read-only.
+- detection stream supported
+- detection stream port
+- detection stream version
 
-### B02 — Detection client
+Rules:
 
-Add a bounded NDJSON parser and independent TCP client.
+- capability is trusted only from fresh authoritative status
+- missing fields mean unsupported
+- old Pi must not produce 47012 connection spam
+
+### B02 — Detection stream decoder/client
+
+Add bounded NDJSON parser and dedicated TCP client.
 
 Acceptance:
-- max 64 KiB line
+
+- maximum 64 KiB line
 - type/version/schema validation
-- <=256 detections
-- finite/range/dimension validation
-- endpoint generation protects host switches
-- metadata failure does not kill RBVS video or HTTP control
-- no RobotController writes
+- maximum 256 detections
+- strictly increasing metadata frame IDs
+- timestamp/dimension/confidence/coordinate validation
+- endpoint generation rejects stale callbacks after host switch
+- detection failure does not kill RBVS video
+- zero RobotController writes
 
-### B03 — Bounded decoded-frame cache
+### B03 — Latest-frame freshness policy
 
-Extend the video side with a fixed-capacity recent decoded-frame cache keyed by
-RBVS `frame_id`.
+Do **not** cache/replay old video frames.
 
-Acceptance:
-- fixed capacity; no unbounded image queue
-- exact frame ID lookup
-- replacement/drop metrics visible in tests
-- host switch/video disconnect clears cache
-- normal inference-disabled display remains latest-frame behavior
+Keep normal RBVS latest-frame display.
 
-### B04 — Exact synchronized display policy
+For the newest valid detection result:
 
-While inference is Running:
-- each metadata record may render only on the cached frame with the exact same
-  `frame_id`
-- exact match displays that cached frame plus text overlay
-- cache miss drops metadata and increments a sync-miss counter
-- never move detections to current/latest/nearest frame
-- zero detections displays the exact matched frame with no previous text
+```text
+age_ns =
+    current_video_capture_timestamp_ns
+    - detection_capture_timestamp_ns
+```
 
-When inference is not Running, video returns to latest-frame display and overlay
-is cleared.
+Render only when:
 
-### B05 — Text-only VideoView rendering
+- inference == Running
+- HTTP status is fresh
+- video is connected
+- metadata dimensions match the current video frame
+- `0 <= age_ns <= 1_500_000_000`
+
+Suppress otherwise.
+
+The 1500 ms constant is UI-only and must not influence model or control logic.
+
+### B04 — Text-only VideoView rendering
 
 Render:
 
@@ -147,30 +168,33 @@ Render:
 near the centroid.
 
 Acceptance:
+
 - no rectangle
+- no background bbox
 - no dot/circle
 - no crosshair
 - no centroid glyph
-- no bbox
-- source coordinates mapped through the actual image paint rectangle
-- text clamped inside the image rectangle
-- small text shadow/outline allowed only for readability
-- resize/high-DPI/source-aspect tests
+- no fixed-size marker
+- source coordinate mapping uses the actual image paint rectangle
+- label is clamped into the visible image rectangle
+- small text shadow/outline is allowed for readability
+- empty/stale/failed/disabled metadata removes text
 
 ## Phase C — Hardware acceptance
 
-1. 47010 / 47011 / 47012 listen.
-2. Connect Video with inference Disabled: latest live video, no label.
+1. 47010 / 47011 / 47012 listening.
+2. Connect Video while inference disabled: no overlay text.
 3. Start Inference: 47012 emits increasing source frame IDs.
-4. Qt displays only exact matched cached frames with text labels.
-5. Metadata whose frame fell out of cache is dropped, never reattached.
-6. Empty detections clears labels on its exact frame.
-7. Stop Inference clears overlay and returns to latest live video.
-8. Disconnect 47012 only: video/control remain usable.
-9. Reconnect does not replay cached preconnection metadata.
+4. Fresh detection text appears over the latest live video.
+5. Empty detections clears old labels.
+6. Stop Inference clears/suppresses text while video continues.
+7. Disconnect only 47012: video/control remain usable.
+8. Reconnect 47012: cached preconnection metadata is not replayed.
+9. Host switch clears metadata state.
 10. No robot motion or RBRP writes.
 
 ## Deferred
 
-TargetTracker, target selection/lock, bbox, visual marker, PID, visual servo,
-threshold/model changes, second camera, and burned-in recording overlays.
+TargetTracker, target selection/lock, bbox, visual marker, old-frame replay,
+PID, visual servo, threshold/model changes, second camera and capture-time
+burned-in overlays.

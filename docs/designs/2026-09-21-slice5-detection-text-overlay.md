@@ -1,11 +1,17 @@
-# Vision Slice 5 — Frame-Synchronized Detection Text Overlay
+# Vision Slice 5 — Frame-Associated Detection Text Overlay
 
 ## Goal
 
-Expose FOMO inference detections to the Qt operator console with exact source-frame
-identity. The first Slice 5 UI renders **text only** near each detection centroid:
+Expose completed FOMO detections to the Qt operator console while preserving the
+latest-frame realtime video path.
+
+The first Slice 5 UI renders **text only** near each fresh detection centroid:
 
 `<class_name> <confidence>`
+
+Example:
+
+`creature 0.87`
 
 No rectangle, crosshair, circle, dot, centroid glyph, fixed-size marker, inferred
 bounding box, tracker, target lock, PID, or robot motion is part of this slice.
@@ -22,15 +28,17 @@ The deployed D2 model remains unchanged:
 - existing FOMO centroid postprocess
 
 FOMO produces centroids, not model-predicted bounding boxes. Slice 5 must not
-reconstruct or imply a true bbox.
+reconstruct, approximate, or imply a true bbox.
 
 ## Network boundaries
+
+Existing contracts remain authoritative:
 
 - `47010`: RBVS v1 JPEG live video, unchanged
 - `47011`: HTTP status/capture/manual inference, existing routes unchanged
 - `47012`: new Slice 5 detection metadata stream
 
-RBVS v1 is not modified, so old Qt builds remain compatible.
+RBVS v1 is intentionally not modified, so old Qt builds continue consuming 47010.
 
 ## Capability advertisement
 
@@ -41,7 +49,7 @@ The `inference` object returned by `GET /api/v1/vision/status` adds:
 - `detection_stream_version: int`
 
 A new Qt client connects to 47012 only after a fresh authoritative status confirms
-support. Missing fields mean overlay unavailable, not an error.
+support. Missing capability means overlay unavailable, not a connection error.
 
 ## 47012 wire contract
 
@@ -86,10 +94,11 @@ Only data required for text overlay crosses the wire. Heatmap coordinates,
 letterbox/input coordinates, component geometry, bbox fields, target IDs and robot
 control fields are not part of the contract.
 
-Empty detections is valid and is transmitted so the client can clear labels for
-that processed frame.
+Empty `detections` is valid and is transmitted so the client can clear old labels
+for that processed result.
 
-All numbers must be finite and coordinates must be inside the source image.
+All numeric fields must be finite and centroid coordinates must lie inside the
+source frame.
 
 ## Latest-only metadata semantics
 
@@ -105,99 +114,121 @@ The metadata path is realtime/latest-only:
 `InferenceResultHub`. The result includes source width/height, frame ID, capture
 timestamp, model identity and detections.
 
-## Exact-frame Qt synchronization
+## Frame association without delaying video
 
-The metadata stream is latest-only, but rendering is **exact-frame only**.
+Inference completes after its source camera frame has normally already been
+displayed. Delaying or replaying video until the matching inference result arrives
+would make the operator console visibly lag by inference latency.
 
-Qt must never transfer a detection result onto a different video frame.
+Slice 5 therefore preserves the existing latest-frame RBVS display. Qt does **not**
+cache old video frames for overlay playback and does **not** freeze the live view.
 
-Planned Qt flow:
+Every metadata record still carries the exact source:
 
-1. `VisionClient` keeps a bounded cache of recently decoded RBVS frames keyed by
-   `frame_id`.
-2. `DetectionClient` validates each 47012 result.
-3. While inference is Running, a result is renderable only when its exact
-   `frame_id` exists in the frame cache.
-4. The matching cached frame becomes the inference-synchronized displayed frame.
-5. Text is rendered near the result centroid on that exact frame.
-6. If the frame has already fallen out of the cache, the metadata is dropped and
-   counted as a sync miss.
-7. A zero-detection result displays its exact matching frame with no old label.
-8. When inference stops/fails/disconnects, display returns to normal latest-frame
-   RBVS video.
+- `frame_id`
+- `capture_timestamp_ns`
+- source width/height
 
-This intentionally allows inference mode to trail the raw live stream by the model
-latency. It does **not** freeze waiting for future results and does not create an
-unbounded image queue.
+Qt compares the Pi monotonic timestamps of the current displayed live frame and
+the newest detection result:
 
-There is no time-window fallback. A nearby timestamp or newer frame is not a valid
-substitute for an exact `frame_id` match.
+```text
+overlay_age_ns =
+    current_video_capture_timestamp_ns - detection_capture_timestamp_ns
+```
 
-## Bounded frame cache
+A result is renderable only when all of these are true:
 
-Qt must use a fixed-capacity recent-frame cache. It may replace old entries but
-must never grow without bound.
+- inference state is `running`
+- Vision HTTP status is fresh
+- metadata stream record is valid
+- current video dimensions equal metadata dimensions
+- `overlay_age_ns >= 0`
+- `overlay_age_ns <= 1_500_000_000` (1500 ms)
 
-The exact capacity is selected in Phase B and covered by tests. Host switch, video
-disconnect, endpoint generation change, or service reset clears the cache.
+If the metadata is from the future, older than 1500 ms, mismatched in resolution,
+or otherwise stale, the overlay is suppressed.
 
-## Text-only rendering contract
+The 1500 ms bound is a **UI freshness constant only**. It is not the model
+confidence threshold and must not be used by future target tracking or control.
 
-Allowed:
+Future tracking/visual-servo logic must consume source detection timestamps
+directly rather than treating the operator overlay as a control signal.
 
-- `creature 0.87`
-- readable foreground text
-- a small text shadow/outline for contrast
-- offsetting/clamping the text so it stays inside the image rectangle
+## Text-only Qt rendering contract
+
+The Qt half of Slice 5 will:
+
+- add a bounded newline decoder and dedicated DetectionClient
+- validate type/version/frame ID/timestamp/dimensions/confidence/coordinates
+- retain only the newest valid metadata record
+- render `class_name confidence` near `original_x/original_y`
+- map original-frame pixels through the exact VideoView image paint rectangle
+- clamp label text into the visible image rectangle
+- allow a small text shadow/outline only for readability
 
 Not allowed:
 
 - rectangle/bbox
-- dot/circle
+- circle/dot
 - crosshair
 - centroid glyph
 - fixed-size marker
+- background detection box
 - target lock indicator
 - tracking trail
 - servo/PID guidance
 
-The source anchor always comes from `original_x/original_y` of the exact matched
-frame.
+## Overlay clear/suppress rules
 
-## Lifecycle
+Overlay text is cleared or suppressed when:
+
+- inference is Disabled, Starting, Stopping, Retrying or Failed
+- Vision HTTP status is stale/unavailable
+- video is disconnected
+- Pi host/endpoint generation changes
+- detection metadata stream disconnects and the retained record becomes stale
+- metadata is older than 1500 ms
+- metadata timestamp is newer than the displayed video timestamp
+- metadata dimensions differ from the live video
+- `detections` is empty
+
+A 47012 failure must not disconnect 47010 video or 47011 control.
+
+## Lifecycle independence
 
 - Connect Video does not start inference.
-- Start Inference remains the only action that starts the worker.
+- Start Inference remains the only action that starts inference.
 - Stop Inference does not stop video.
 - Detection stream disconnect does not stop inference.
 - Video disconnect does not stop inference.
-- Inference Disabled/Failed, stale HTTP status, host switch, or detection
-  disconnect clears/suppresses overlay state.
 - Overlay rendering produces zero RobotController/RBRP writes.
 
 ## Compatibility
 
 Old Qt + new Pi:
 
-- old Qt ignores extra status fields and 47012
+- old Qt ignores additional status fields and port 47012
 - RBVS v1 continues unchanged
 
 New Qt + old Pi:
 
-- missing capability means no overlay connection
+- missing detection capability means no overlay connection
 - no repeated 47012 connection attempts
 - video/manual inference continue normally
 
 New Qt + new Pi:
 
-- exact `frame_id` synchronized text overlay
-
-A 47012 failure must not disconnect 47010 video or 47011 control.
+- latest live video remains realtime
+- fresh frame-associated detection text is displayed when within the 1500 ms UI
+  freshness window
 
 ## Explicit exclusions
 
 - bbox reconstruction
 - visual marker
+- old-frame replay for overlay
+- unbounded video/detection queues
 - TargetTracker
 - target selection/lock
 - optical flow
@@ -213,4 +244,4 @@ A 47012 failure must not disconnect 47010 video or 47011 control.
 - second camera
 - burned-in recording overlays
 - modification of RBVS v1
-- inference result backlog
+- inference-result backlog
