@@ -311,3 +311,32 @@ def test_tcp_server_rejects_invalid_configuration_before_listening(
         server.start()
 
     assert server.bound_port is None
+
+
+def test_runtime_server_failure_closes_listener_and_clears_bound_port() -> None:
+    class _ExplodingServer(DetectionTcpServer):
+        def _configure_client(self, client: socket.socket) -> None:
+            raise RuntimeError("metadata accept path failed")
+
+    server = _ExplodingServer(
+        InferenceResultHub(),
+        bind_host="127.0.0.1",
+        port=0,
+        write_timeout=0.2,
+    ).start()
+    assert server.bound_port is not None
+    port = server.bound_port
+
+    client = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+    try:
+        assert _wait_until(lambda: server.last_error is not None)
+        assert isinstance(server.last_error, RuntimeError)
+        assert "metadata accept path failed" in str(server.last_error)
+        assert _wait_until(lambda: server.bound_port is None)
+        assert not server.client_connected.is_set()
+    finally:
+        client.close()
+        server.stop()
+
+    with pytest.raises(OSError):
+        socket.create_connection(("127.0.0.1", port), timeout=0.2)

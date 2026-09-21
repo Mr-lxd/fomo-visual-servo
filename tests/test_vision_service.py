@@ -82,6 +82,13 @@ def test_service_status_advertises_actual_bound_detection_port() -> None:
         assert isinstance(status["detection_stream_port"], int)
         assert status["detection_stream_port"] > 0
         assert status["detection_stream_port"] == service.detection_server.bound_port
+
+        service.detection_server.last_error = RuntimeError(
+            "metadata listener failed"
+        )
+        failed_status = service._inference_status()
+        assert failed_status["detection_stream_supported"] is False
+        assert failed_status["detection_stream_version"] == DETECTION_STREAM_VERSION
     finally:
         service.detection_server.stop()
 

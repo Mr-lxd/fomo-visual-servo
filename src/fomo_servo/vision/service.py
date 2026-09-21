@@ -135,7 +135,9 @@ class VisionService:
 
     def _inference_status(self) -> dict:
         status = self.inference_control.status()
-        status["detection_stream_supported"] = True
+        status["detection_stream_supported"] = (
+            self.detection_server.last_error is None
+        )
         status["detection_stream_port"] = (
             self.detection_server.bound_port
             if self.detection_server.bound_port is not None

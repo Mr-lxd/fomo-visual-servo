@@ -340,6 +340,17 @@ class DetectionTcpServer:
         except BaseException as error:
             self.last_error = error
             LOGGER.exception("Detection metadata server failed")
+        finally:
+            self.client_connected.clear()
+            self.disconnect_client()
+            listener = self._listener
+            self._listener = None
+            if listener is not None:
+                try:
+                    listener.close()
+                except OSError:
+                    pass
+            self.bound_port = None
 
     def _configure_client(self, client: socket.socket) -> None:
         client.settimeout(self._write_timeout)
