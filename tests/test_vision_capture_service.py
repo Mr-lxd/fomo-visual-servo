@@ -421,8 +421,9 @@ def test_disabled_inference_is_exposed_in_service_status(tmp_path: Path) -> None
     )
 
     status = service.control_server._status_payload()
+    inference = status["inference"]
 
-    assert status["inference"] == {
+    assert inference == {
         "configured": False,
         "control_supported": True,
         "detection_stream_supported": True,
@@ -441,6 +442,8 @@ def test_disabled_inference_is_exposed_in_service_status(tmp_path: Path) -> None
         "latency_ms": None,
         "detection_count": None,
         "last_error": None,
+        "vision_process_rss_bytes": inference["vision_process_rss_bytes"],
+        "system_total_memory_bytes": inference["system_total_memory_bytes"],
     }
 
 
@@ -466,8 +469,9 @@ def test_configured_inference_status_is_read_from_single_worker(
     )
 
     status = service.control_server._status_payload()
+    inference = status["inference"]
 
-    assert status["inference"] == {
+    assert inference == {
         **_RecordingInferenceWorker.instances[0].status(),
         "configured": True,
         "control_supported": True,
@@ -475,6 +479,8 @@ def test_configured_inference_status_is_read_from_single_worker(
         "detection_stream_port": 47012,
         "detection_stream_version": 1,
         "operation": None,
+        "vision_process_rss_bytes": inference["vision_process_rss_bytes"],
+        "system_total_memory_bytes": inference["system_total_memory_bytes"],
     }
     assert len(_RecordingInferenceWorker.instances) == 1
 
@@ -489,7 +495,8 @@ def test_configured_service_stays_disabled_until_manual_start(
     service.start_live()
 
     assert events == ["mode.live", "control.start"]
-    assert service._inference_status() == {
+    inference = service._inference_status()
+    assert inference == {
         "configured": True,
         "control_supported": True,
         "detection_stream_supported": True,
@@ -508,6 +515,8 @@ def test_configured_service_stays_disabled_until_manual_start(
         "latency_ms": None,
         "detection_count": None,
         "last_error": None,
+        "vision_process_rss_bytes": inference["vision_process_rss_bytes"],
+        "system_total_memory_bytes": inference["system_total_memory_bytes"],
     }
 
     accepted = service.start_inference()
@@ -990,6 +999,8 @@ def test_invalid_inference_artifact_fails_only_after_manual_start_and_keeps_live
             "latency_ms",
             "detection_count",
             "last_error",
+            "vision_process_rss_bytes",
+            "system_total_memory_bytes",
         }
         assert failed_status["inference"]["last_error"]
         assert failed_status["inference"]["artifact_name"] is None

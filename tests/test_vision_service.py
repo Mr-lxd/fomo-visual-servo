@@ -2,17 +2,96 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import fomo_servo.vision.service as service_module
 from fomo_servo.vision.detection_streaming import DETECTION_STREAM_VERSION
 from fomo_servo.vision.service import VisionService, VisionServiceConfig
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "vision_live.py"
+
+
+def test_process_memory_status_reports_rss_and_total_memory_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        service_module.Path,
+        "read_text",
+        lambda _path, encoding: "100 7 3 2 1 0 0",
+    )
+    monkeypatch.setattr(
+        os,
+        "sysconf",
+        lambda name: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 1000}[name],
+        raising=False,
+    )
+
+    assert service_module.process_memory_status() == (7 * 4096, 1000 * 4096)
+
+
+@pytest.mark.parametrize("statm", [OSError("statm unavailable"), "100 malformed"])
+def test_process_memory_status_reports_none_for_unavailable_or_malformed_rss(
+    monkeypatch: pytest.MonkeyPatch,
+    statm: OSError | str,
+) -> None:
+    def read_statm(_path, encoding):
+        if isinstance(statm, OSError):
+            raise statm
+        return statm
+
+    monkeypatch.setattr(service_module.Path, "read_text", read_statm)
+    monkeypatch.setattr(
+        os,
+        "sysconf",
+        lambda name: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 1000}[name],
+        raising=False,
+    )
+
+    assert service_module.process_memory_status() == (None, 1000 * 4096)
+
+
+def test_process_memory_status_reports_none_when_total_memory_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        service_module.Path,
+        "read_text",
+        lambda _path, encoding: "100 7 3 2 1 0 0",
+    )
+
+    def sysconf(name: str) -> int:
+        if name == "SC_PHYS_PAGES":
+            raise OSError("physical page count unavailable")
+        return 4096
+
+    monkeypatch.setattr(os, "sysconf", sysconf, raising=False)
+
+    assert service_module.process_memory_status() == (7 * 4096, None)
+
+
+def test_service_inference_status_includes_memory_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        service_module,
+        "process_memory_status",
+        lambda: (327786496, 4089446400),
+        raising=False,
+    )
+    service = VisionService(VisionServiceConfig())
+    try:
+        status = service._inference_status()
+    finally:
+        service.shutdown()
+
+    assert status["vision_process_rss_bytes"] == 327786496
+    assert status["system_total_memory_bytes"] == 4089446400
 
 
 def _load_script():

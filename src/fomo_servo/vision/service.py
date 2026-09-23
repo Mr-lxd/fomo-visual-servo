@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Any
@@ -27,6 +28,32 @@ from .streaming import (
     DEFAULT_WRITE_TIMEOUT_SECONDS,
     VisionTcpServer,
 )
+
+
+def process_memory_status() -> tuple[int | None, int | None]:
+    """Return current process RSS and system physical memory in bytes."""
+
+    rss_bytes = None
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        resident_pages = int(
+            Path("/proc/self/statm").read_text(encoding="ascii").split()[1]
+        )
+        if resident_pages >= 0 and page_size >= 0:
+            rss_bytes = resident_pages * page_size
+    except (AttributeError, IndexError, OSError, ValueError):
+        rss_bytes = None
+
+    total_memory_bytes = None
+    try:
+        total_pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        if total_pages >= 0 and page_size >= 0:
+            total_memory_bytes = total_pages * page_size
+    except (AttributeError, OSError, ValueError):
+        total_memory_bytes = None
+
+    return rss_bytes, total_memory_bytes
 
 
 @dataclass(frozen=True)
@@ -135,6 +162,9 @@ class VisionService:
 
     def _inference_status(self) -> dict:
         status = self.inference_control.status()
+        rss_bytes, total_memory_bytes = process_memory_status()
+        status["vision_process_rss_bytes"] = rss_bytes
+        status["system_total_memory_bytes"] = total_memory_bytes
         status["detection_stream_supported"] = (
             self.detection_server.last_error is None
         )

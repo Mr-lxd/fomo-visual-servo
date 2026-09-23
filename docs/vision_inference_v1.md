@@ -77,7 +77,13 @@ GET http://<pi-host>:47011/api/v1/vision/status
 The status payload includes lifecycle state, frozen artifact identity/hash,
 latest completed frame metadata, processed/skipped counts, inference FPS,
 latency, detection count, and the last error. It does not expose full
-detections over HTTP. There is no `47012` service and no
+detections over HTTP. The `inference` object also reports
+`vision_process_rss_bytes` (the RSS of the complete Vision Python process,
+including ONNX Runtime/model, camera, HTTP, video, and detection allocations;
+this is not model-only memory) and `system_total_memory_bytes` (the Linux
+system's total physical RAM). Both values are non-negative byte counts when
+available, or `null` when their query fails. Memory = Vision process RSS / total
+system physical memory. There is no `47012` service and no
 `/api/v1/vision/inference/latest` endpoint. TCP `47010` remains the realtime
 JPEG video stream.
 
