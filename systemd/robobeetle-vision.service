@@ -1,0 +1,15 @@
+[Unit]
+Description=RoboBeetle Vision Live Service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h/fomo-vision-runtime
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/venvs/fomo-ort-d2-epoch40/bin/python %h/fomo-vision-runtime/run.py vision_live --source /dev/video0 --width 640 --height 480 --fps 25 --fourcc YUYV --bind 0.0.0.0 --port 47010 --control-port 47011 --capture-output-root datasets_raw/hardware_gate_g_restart --inference-onnx artifacts/d2_mobilenet_v2_fomo_seed42_epoch40.onnx --inference-report artifacts/d2_mobilenet_v2_fomo_seed42_epoch40.onnx.json
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

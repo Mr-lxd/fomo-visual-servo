@@ -106,7 +106,7 @@ opencv-python==5.0.0.93           # preview profile，独立 venv
 
 ### Headless deployment
 
-适用于 benchmark、无人值守运行以及后续 systemd 集成。`--display` 默认关闭：
+以下 `predict_video` 命令仍用于 benchmark / headless smoke。当前长期无人值守的 Vision LIVE 路径已经使用 user-level systemd；已验证的 runtime/data 布局、安装脚本和验收命令见 [`systemd/README.md`](systemd/README.md)。`--display` 默认关闭：
 
 ```bash
 cd /home/pi/fomo-ort-d2-epoch40

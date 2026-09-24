@@ -284,6 +284,8 @@ run_id="$(date +%Y%m%d-%H%M%S)"
 
 ## 8. Deferred / 下一阶段边界
 
+> 2026-09-24 follow-up: this section records the scope boundary at the time of the original handoff. User-level systemd deployment has since been implemented and hardware-verified; see [`systemd/README.md`](../../systemd/README.md). The remaining bullets continue to describe the historical milestone boundary.
+
 明确 deferred，不应扩大本 milestone：
 
 - Finding 5 `metrics.__dir__()` introspection compatibility。
