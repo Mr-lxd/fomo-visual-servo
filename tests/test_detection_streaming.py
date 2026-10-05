@@ -102,12 +102,12 @@ def test_encoder_emits_minimal_original_frame_centroid_contract() -> None:
                 "confidence": 0.875,
                 "original_x": 320.5,
                 "original_y": 207.25,
+                "component_area_cells": 3,
             }
         ],
     }
     assert "bbox" not in encoded.decode("utf-8")
     assert "heatmap" not in encoded.decode("utf-8")
-    assert "component_area" not in encoded.decode("utf-8")
 
 
 def test_encoder_emits_empty_detection_list_to_clear_old_overlay() -> None:
@@ -135,6 +135,10 @@ def test_encoder_rejects_unbounded_detection_count() -> None:
         (_result(1, [_detection(original_x=-0.1)]), "original_x"),
         (_result(1, [_detection(original_x=640.0)]), "original_x"),
         (_result(1, [_detection(original_y=480.0)]), "original_y"),
+        (_result(1, [_detection(component_area_cells=0)]), "component_area_cells"),
+        (_result(1, [_detection(component_area_cells=-2)]), "component_area_cells"),
+        (_result(1, [_detection(component_area_cells=2.0)]), "component_area_cells"),
+        (_result(1, [_detection(component_area_cells=True)]), "component_area_cells"),
         (_result(1, [_detection(class_name="")]), "class_name"),
         (_result(1, [_detection(class_name="x" * 129)]), "class_name"),
     ],
