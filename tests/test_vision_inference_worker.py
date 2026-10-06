@@ -1365,3 +1365,40 @@ def test_contract_whitelist_rejects_unknown_or_mixed_identity(identity) -> None:
         InferenceWorker._validate_contract(
             SimpleNamespace(**{**EXPECTED_CONTRACT, **identity})
         )
+
+
+V2_IDENTITY = {
+    "artifact_name": "lab_pool_v2_fomo_seed42_e150",
+    "checkpoint_epoch": 150,
+    "onnx_sha256": "05acdc7a83264100be6d19ca8ba5641ba7c6448337038bc99f3a74326d225c10",
+    "confidence_threshold": 0.60,
+}
+
+
+def test_contract_whitelist_accepts_v2_model_with_its_own_threshold() -> None:
+    InferenceWorker._validate_contract(
+        SimpleNamespace(**{**EXPECTED_CONTRACT, **V2_IDENTITY})
+    )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"confidence_threshold": 0.40},
+        {"confidence_threshold": 0.55},
+        {"checkpoint_epoch": 20},
+    ],
+)
+def test_contract_whitelist_rejects_v2_threshold_or_epoch_mismatch(override) -> None:
+    with pytest.raises(ValueError, match="contract mismatch"):
+        InferenceWorker._validate_contract(
+            SimpleNamespace(**{**EXPECTED_CONTRACT, **V2_IDENTITY, **override})
+        )
+
+
+@pytest.mark.parametrize("identity", [{}, POOL_IDENTITY])
+def test_older_models_still_require_threshold_040(identity) -> None:
+    with pytest.raises(ValueError, match="contract mismatch"):
+        InferenceWorker._validate_contract(
+            SimpleNamespace(**{**EXPECTED_CONTRACT, **identity, "confidence_threshold": 0.60})
+        )
