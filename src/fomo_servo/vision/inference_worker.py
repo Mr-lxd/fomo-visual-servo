@@ -54,7 +54,6 @@ class InferenceResult:
 
 _SHARED_CONTRACT = {
     "checkpoint_seed": 42,
-    "confidence_threshold": 0.40,
     "input_shape": (1, 3, 192, 192),
     "input_dtype": "float32",
     "input_color_order": "RGB",
@@ -65,16 +64,24 @@ _SHARED_CONTRACT = {
     "opset": 17,
 }
 
-# Allowed models, keyed by ONNX SHA-256. The lab-pool model is the one in use;
-# the original D2 epoch-40 model is kept for rollback.
+# Allowed models, keyed by ONNX SHA-256. The newest lab-pool model is the one in use;
+# the earlier lab-pool model and the original D2 epoch-40 model are kept for rollback.
+# Each model carries its own detection threshold (chosen by cross-validation).
 _MODEL_IDENTITIES = {
+    "05acdc7a83264100be6d19ca8ba5641ba7c6448337038bc99f3a74326d225c10": {
+        "artifact_name": "lab_pool_v2_fomo_seed42_e150",
+        "checkpoint_epoch": 150,
+        "confidence_threshold": 0.60,
+    },
     "d45c3fb34bea9dfb910e6a5eda26a3911705e45dd15fce61db1a9caa058bb518": {
         "artifact_name": "lab_pool_d2_seed42_e20",
         "checkpoint_epoch": 20,
+        "confidence_threshold": 0.40,
     },
     "3dea74511bf2c44844192e75594fd53d4c4ce941f8b53b15767e020832bf9b08": {
         "artifact_name": "d2_mobilenet_v2_fomo_seed42_epoch40",
         "checkpoint_epoch": 40,
+        "confidence_threshold": 0.40,
     },
 }
 
