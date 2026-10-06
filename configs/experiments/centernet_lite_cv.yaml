@@ -1,0 +1,55 @@
+# Leave-one-session-out CV: B20 / B60 / C60. All values fixed before any run; no epoch,
+# threshold or architecture selection on held-out results.
+data:
+  # Paths come from the command line (--dataset-root, --init-weights); never hard-coded.
+  held_out_sessions: [pool-20260831-001, pool-20260831-002, pool-20260831-003, pool-20260831-004]
+  frozen_test_session: pool-20260831-005   # must never be read
+  distance_threshold_px: 81.0              # "adjacent" GT pairs: centre distance <= 81 px
+
+model:
+  input_size: 192
+  output_stride: 8
+  width_multiplier: 0.35
+  head_channels: 32
+  num_classes: 7                           # D2 contract
+  init_sha256: e8c242f4af2b87b70fea2a516352f28e70bf438161eeb7d092231ed46c976a1d
+
+augmentation:
+  enabled: true
+  preset: underwater_conservative
+  overrides: {}
+
+training:
+  device: cuda
+  amp: true
+  amp_initial_scale: 256.0
+  batch_size: 8
+  seed: 42
+  num_workers: 0
+  optimizer: {name: adamw, learning_rate: 0.0001, weight_decay: 0.0001}
+  # C only: the three new 1x1 branches start from random init (heat bias -2.19);
+  # backbone and shared 1x1 conv use learning_rate above.
+  new_head_learning_rate: 0.001
+  runs:
+    B20: {kind: fomo, epochs: 20}
+    B60: {kind: fomo, epochs: 60}
+    C60: {kind: centernet, epochs: 60}
+
+fomo_loss:                                 # identical to lab_pool_adaptation_seed42_e20
+  name: ei_weighted_xent_legacy
+  gamma: 0.0
+  background_weight: 1.0
+  object_weight: 100.0
+
+centernet_loss:
+  heat: {alpha: 2.0, beta: 4.0}            # penalty-reduced focal loss, normalised by #positives
+  offset_weight: 1.0                       # L1 on sigmoid offsets
+  size_weight: 0.1                         # L1 on log(w), log(h) in grid cells
+  gaussian_min_overlap: 0.7
+
+evaluation:
+  thresholds_report: [0.3, 0.4, 0.5]
+  sweep: {start: 0.05, stop: 0.95, step: 0.05}
+  matching: centroid_in_bbox               # centroid inside GT box, greedy by distance
+  headline_threshold: 0.4
+  overlay_samples_per_model: 6
