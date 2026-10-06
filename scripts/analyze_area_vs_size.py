@@ -14,6 +14,7 @@ import argparse
 import csv
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -84,7 +85,14 @@ def is_monotonic(rows: list[dict]) -> bool:
     return all(b > a for a, b in zip(medians, medians[1:]))
 
 
-def collect(predictor, images: list[Path], labels_dir: Path, class_names, threshold: float):
+def collect(
+    predictor,
+    images: list[Path],
+    labels_dir: Path,
+    class_names,
+    threshold: float,
+    class_agnostic: bool = False,
+):
     evaluator = CentroidEvaluator(class_names)
     pairs, unmatched_gt, false_positives = [], 0, 0
     for image_path in images:
@@ -104,7 +112,15 @@ def collect(predictor, images: list[Path], labels_dir: Path, class_names, thresh
             )
         ]
         gts = ground_truths_from_boxes(boxes, class_names)
-        matches, unmatched_predictions, unmatched_gts = evaluator._match(detections, gts)
+        if class_agnostic:
+            # Match on position only: every class becomes class 0 for matching.
+            matching_dets = [replace(d, class_id=0) for d in detections]
+            matching_gts = [replace(g, class_id=0) for g in gts]
+        else:
+            matching_dets, matching_gts = detections, gts
+        matches, unmatched_predictions, unmatched_gts = evaluator._match(
+            matching_dets, matching_gts
+        )
         unmatched_gt += len(unmatched_gts)
         false_positives += len(unmatched_predictions)
         for p, g, _ in matches:
@@ -195,6 +211,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--images", type=Path, required=True)
     parser.add_argument("--labels", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--class-agnostic",
+        action="store_true",
+        help="match detections to ground truth ignoring class (default: same class required)",
+    )
     parser.add_argument("--unlabeled-images", type=Path, help="optional: count detections and area only")
     args = parser.parse_args(argv)
 
@@ -206,10 +227,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     summary = {
         "onnx_sha256": predictor.contract.onnx_sha256,
         "images": len(images),
+        "class_agnostic": args.class_agnostic,
         "thresholds": {},
     }
     for threshold in THRESHOLDS:
-        pairs, counts = collect(predictor, images, args.labels, class_names, threshold)
+        pairs, counts = collect(
+            predictor, images, args.labels, class_names, threshold, args.class_agnostic
+        )
         entry = {**counts, **summarize(pairs)}
         summary["thresholds"][f"{threshold:.2f}"] = entry
         if threshold == 0.40:
