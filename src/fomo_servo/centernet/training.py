@@ -149,6 +149,8 @@ def train_model(
     cfg: Mapping[str, Any],
     init_weights: Path,
     log: Any = print,
+    snapshot_epochs: Sequence[int] = (),
+    on_snapshot: Any = None,
 ) -> tuple[nn.Module, list[dict[str, float]], dict]:
     """Train ``epochs`` fixed epochs; return the final-epoch model, history and init report."""
 
@@ -217,6 +219,8 @@ def train_model(
             count += n
         row = {"epoch": epoch + 1, **{k: v / count for k, v in totals.items()}}
         history.append(row)
+        if on_snapshot is not None and (epoch + 1) in snapshot_epochs:
+            on_snapshot(epoch + 1, model)
         if (epoch + 1) % 10 == 0 or epoch == 0 or epoch + 1 == epochs:
             log("  epoch {:>3}/{}: {}".format(epoch + 1, epochs, ", ".join("{}={:.4f}".format(k, v) for k, v in row.items() if k != "epoch")))
     for name, p in model.named_parameters():
