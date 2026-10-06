@@ -1329,3 +1329,39 @@ def test_ten_controlled_start_stop_cycles_have_no_generation_result_or_counter_l
         }
 
     assert factory_calls == 10
+
+
+POOL_IDENTITY = {
+    "artifact_name": "lab_pool_d2_seed42_e20",
+    "checkpoint_epoch": 20,
+    "onnx_sha256": "d45c3fb34bea9dfb910e6a5eda26a3911705e45dd15fce61db1a9caa058bb518",
+}
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {},
+        POOL_IDENTITY,
+    ],
+)
+def test_contract_whitelist_accepts_both_known_models(identity) -> None:
+    InferenceWorker._validate_contract(
+        SimpleNamespace(**{**EXPECTED_CONTRACT, **identity})
+    )
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"onnx_sha256": "0" * 64},
+        {**POOL_IDENTITY, "checkpoint_epoch": 40},
+        {**POOL_IDENTITY, "artifact_name": "d2_mobilenet_v2_fomo_seed42_epoch40"},
+        {"checkpoint_epoch": 20},
+    ],
+)
+def test_contract_whitelist_rejects_unknown_or_mixed_identity(identity) -> None:
+    with pytest.raises(ValueError, match="contract mismatch"):
+        InferenceWorker._validate_contract(
+            SimpleNamespace(**{**EXPECTED_CONTRACT, **identity})
+        )

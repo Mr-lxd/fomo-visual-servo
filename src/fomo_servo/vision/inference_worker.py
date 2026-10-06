@@ -52,12 +52,9 @@ class InferenceResult:
     detections: tuple[Detection, ...]
 
 
-_EXPECTED_CONTRACT = {
-    "artifact_name": "d2_mobilenet_v2_fomo_seed42_epoch40",
+_SHARED_CONTRACT = {
     "checkpoint_seed": 42,
-    "checkpoint_epoch": 40,
     "confidence_threshold": 0.40,
-    "onnx_sha256": "3dea74511bf2c44844192e75594fd53d4c4ce941f8b53b15767e020832bf9b08",
     "input_shape": (1, 3, 192, 192),
     "input_dtype": "float32",
     "input_color_order": "RGB",
@@ -66,6 +63,19 @@ _EXPECTED_CONTRACT = {
     "output_dtype": "float32",
     "output_semantic": "raw_logits",
     "opset": 17,
+}
+
+# Allowed models, keyed by ONNX SHA-256. The lab-pool model is the one in use;
+# the original D2 epoch-40 model is kept for rollback.
+_MODEL_IDENTITIES = {
+    "d45c3fb34bea9dfb910e6a5eda26a3911705e45dd15fce61db1a9caa058bb518": {
+        "artifact_name": "lab_pool_d2_seed42_e20",
+        "checkpoint_epoch": 20,
+    },
+    "3dea74511bf2c44844192e75594fd53d4c4ce941f8b53b15767e020832bf9b08": {
+        "artifact_name": "d2_mobilenet_v2_fomo_seed42_epoch40",
+        "checkpoint_epoch": 40,
+    },
 }
 
 
@@ -334,7 +344,15 @@ class InferenceWorker:
     def _validate_contract(contract: Any) -> None:
         if contract is None:
             raise ValueError("contract mismatch: contract is missing")
-        for field, expected in _EXPECTED_CONTRACT.items():
+        sha256 = getattr(contract, "onnx_sha256", None)
+        identity = _MODEL_IDENTITIES.get(sha256) if isinstance(sha256, str) else None
+        if identity is None:
+            allowed = ", ".join(m["artifact_name"] for m in _MODEL_IDENTITIES.values())
+            raise ValueError(
+                f"contract mismatch: onnx_sha256 {sha256!r} is not an allowed model ({allowed})"
+            )
+        expected_contract = {**_SHARED_CONTRACT, **identity, "onnx_sha256": sha256}
+        for field, expected in expected_contract.items():
             try:
                 actual = getattr(contract, field)
             except AttributeError as error:

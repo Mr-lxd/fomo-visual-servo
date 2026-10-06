@@ -84,13 +84,16 @@ Record:
       "class_name": "creature",
       "confidence": 0.87,
       "original_x": 321.4,
-      "original_y": 208.7
+      "original_y": 208.7,
+      "component_area_cells": 3
     }
   ]
 }
 ```
 
-Only data required for text overlay crosses the wire. Heatmap coordinates,
+`component_area_cells` (positive integer, optional addition, `version` stays 1) is the
+number of heatmap grid cells in the detected component; clients that do not know
+the field ignore it. Otherwise only data required for text overlay crosses the wire. Heatmap coordinates,
 letterbox/input coordinates, component geometry, bbox fields, target IDs and robot
 control fields are not part of the contract.
 

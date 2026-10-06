@@ -2,8 +2,8 @@
 
 The stream deliberately does not modify RBVS v1 on port 47010. Each newline-
 delimited JSON record is associated with the source camera frame by frame_id
-and carries only original-frame centroid coordinates required by the Qt text
-overlay. It is not a bounding-box, tracker, or robot-control protocol.
+and carries original-frame centroid coordinates and the component area in
+heatmap cells. It is not a bounding-box, tracker, or robot-control protocol.
 """
 
 from __future__ import annotations
@@ -77,6 +77,9 @@ def encode_inference_result(result: InferenceResult) -> bytes:
             or detection.class_id < 0
         ):
             raise DetectionStreamError("class_id must be a non-negative integer")
+        area_cells = detection.component_area_cells
+        if isinstance(area_cells, bool) or not isinstance(area_cells, int) or area_cells < 1:
+            raise DetectionStreamError("component_area_cells must be a positive integer")
         confidence = _finite_number("confidence", detection.confidence)
         original_x = _finite_number("original_x", detection.original_x)
         original_y = _finite_number("original_y", detection.original_y)
@@ -101,6 +104,7 @@ def encode_inference_result(result: InferenceResult) -> bytes:
                 "confidence": confidence,
                 "original_x": original_x,
                 "original_y": original_y,
+                "component_area_cells": area_cells,
             }
         )
 
