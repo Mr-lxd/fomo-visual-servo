@@ -1,4 +1,4 @@
-# Task 10 phase A — tuna miss diagnosis (partial: C complete, A/B awaiting captures)
+# Task 10 phase A — tuna miss diagnosis (C complete, A' screen package ready)
 
 Scope: diagnosis only. No training, runtime threshold change, deployment, or phase B.
 
@@ -28,6 +28,20 @@ Results: `D:\RoboBeetle-results\task10-tuna-miss-2026-10-07\C\` (`recall.csv`, `
 
 Deployment ONNX SHA-256 verified read only: `05acdc7a83264100be6d19ca8ba5641ba7c6448337038bc99f3a74326d225c10`.
 
-A: pending >=5 near snapshots, >=3 far snapshots, and 20–30 s recording. B: pending displayed source video and approximate timestamps. Current Pi address and capture paths also required before read-only scp. No Pi connection has been made. If displayed video is frozen session 005, record that fact and do not infer on it (including screen captures derived from it).
+Task brief v3 replaces the previous recording/timestamp request with eight numbered screen snapshots. No recording or video timestamps are needed. Current Pi address and capture paths are needed before read-only scp; the latest user-provided address is 192.168.137.86. No Pi connection has been made.
 
 No analysis unit tests were added or run, per task instructions. Verification is execution on the requested held-out data, exact pooled-metric reproduction, per-object CSV accounting and visual inspection of the histogram. UI change is a separate RoboBeetle draft PR.
+
+## Phase A' numbered screen package (v3)
+
+Run `scripts/prepare_tuna_screen_test.py --dataset-root <lab_pool_v2_vis> --model <lab_pool_v2_fomo_seed42_e150.onnx> --report <onnx-sidecar.json> --output <results>/screen-test`.
+
+Eight unchanged 640x480 JPGs are copied into `screen-test`, numbered 01–08. 01/02 are small tuna (<150 px), 03/04 medium tuna (150–250 px), 05/06 large tuna (>=350 px), 07 jellyfish, 08 source fish. Eligible boxes have source visibility full, correct-class raw probability >=0.8 and a detection whose centroid lies in the source box at offline threshold 0.60. The highest-scoring distinct source images in each group are chosen deterministically. Source annotation visibility is retained; this is not a new visibility review.
+
+Target scores for 01–08: 0.9800, 0.9551, 0.9904, 0.9869, 0.9254, 0.8343, 0.99997, 0.99980. Tuna is displayed as fish under the fixed D2 class mapping. These deliberately selected known positives from training data are a paired screen-domain diagnostic, not an independent model-accuracy evaluation.
+
+`expected.csv` records target-box score/location/class and ROI, whole-image highest foreground score/location/class, deployed-threshold detection score, source image, original-pixel size, model and image hashes. Keeping target and global peaks separate matters when other objects have higher scores. Source and copied image hashes agree; all eight dimensions and scores were verified. An annotated contact sheet outside the image package was visually inspected; the eight display originals have no overlays or altered pixels.
+
+User procedure: open JPG 01 through 08 full screen in order, aim the USB camera at the display and click Snapshot once per image. No recording and no timestamps. After capture, use read-only scp for the eight snapshots and optional direct-camera real tuna-in-water snapshots; infer with the same model at offline analysis threshold 0.05 and produce paired probability overlays and a score table. No runtime threshold changes, deployment, retraining or phase B.
+
+UI PR #56 was moved to ready and merged with a merge commit on explicit user authorization: `43b6b71e3093447031e243746aa5d76ec4237cb9`. Reviewed head remains `4fdfb63418486ecc4e93da0752fcc44e0d9af843`; its previously completed single Qt regression was 31/31. fomo PR #16 remains draft.
