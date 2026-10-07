@@ -99,23 +99,43 @@ class KeypointTrainDataset(Dataset):
         }
 
 
-class FOMOKeypointNet(MobileNetV2FOMONet):
-    """Original backbone/head state names plus random Conv2d(32,4,1).
+KEYPOINT_HEAD_ARCHS = ("linear1x1", "conv3x3_relu_conv1x1")
 
+
+class FOMOKeypointNet(MobileNetV2FOMONet):
+    """Original backbone/head state names plus a randomly initialised branch.
+
+    ``linear1x1`` is the round-1 head (Conv2d(32,4,1), 132 parameters).
+    ``conv3x3_relu_conv1x1`` is the round-2 KP-detach head (3x3 conv 32→32,
+    ReLU, 1x1 conv →4, 9380 parameters). ``detach_keypoint_input`` stops the
+    branch gradient at ``shared`` so detection updates are untouched.
     forward returns detection logits [B,8,G,G] and unbounded signed-log1p
     offsets [B,4,G,G]. Both branches share the original head's ReLU features.
     Detection initialisation happens before creating the random branch.
     """
-    def __init__(self, *, init_weights: Path, init_sha256: str, **kwargs):
+    def __init__(self, *, init_weights: Path, init_sha256: str,
+                 keypoint_head_arch: str = "linear1x1", detach_keypoint_input: bool = False, **kwargs):
         super().__init__(**kwargs)
         self.init_report = initialize_model_weights(self, init_weights, init_sha256)
-        self.keypoint_head = nn.Conv2d(self.head_channels, 4, kernel_size=1)
+        if keypoint_head_arch not in KEYPOINT_HEAD_ARCHS:
+            raise ValueError("unknown keypoint head arch: {!r}".format(keypoint_head_arch))
+        self.keypoint_head_arch = keypoint_head_arch
+        self.detach_keypoint_input = bool(detach_keypoint_input)
+        if keypoint_head_arch == "linear1x1":
+            self.keypoint_head = nn.Conv2d(self.head_channels, 4, kernel_size=1)
+        else:
+            self.keypoint_head = nn.Sequential(
+                nn.Conv2d(self.head_channels, self.head_channels, kernel_size=3, padding=1),
+                nn.ReLU(inplace=False),
+                nn.Conv2d(self.head_channels, 4, kernel_size=1),
+            )
 
     def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Float32 RGB [B,3,S,S] → logits [B,8,G,G], offsets [B,4,G,G]."""
         self._validate_images(images)
         shared = self.head[1](self.head[0](self.backbone(images)))
-        return self.head[2](shared), self.keypoint_head(shared)
+        source = shared.detach() if self.detach_keypoint_input else shared
+        return self.head[2](shared), self.keypoint_head(source)
 
 
 def keypoint_loss(offsets: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -131,15 +151,24 @@ def train_keypoint_model(
     epochs: int, train_samples: Sequence[KPSample], cfg: Mapping[str, Any],
     init_weights: Path, log: Any = print, snapshot_epochs: Sequence[int] = (), on_snapshot: Any = None,
 ) -> tuple[nn.Module, list[dict[str, float]], dict]:
-    """Joint train every weight; return model, epoch history and init/AMP report."""
+    """Joint train every weight; return model, epoch history and init/AMP report.
+
+    ``keypoint_loss.weight=0`` keeps the round-1 graph but removes the keypoint
+    gradient (control run). ``keypoint_head.detach_input`` blocks the branch
+    gradient at the shared features (KP-detach run).
+    """
     t, m = cfg["training"], cfg["model"]
     weight = cfg["keypoint_loss"]["weight"]
+    head_cfg = cfg.get("keypoint_head", {})
+    arch = head_cfg.get("arch", "linear1x1")
+    detach = bool(head_cfg.get("detach_input", False))
     seed_everything(t["seed"])
     device = torch.device(t["device"])
     model = FOMOKeypointNet(
         init_weights=init_weights, init_sha256=m["init_sha256"],
         num_classes=m["num_classes"], input_size=m["input_size"],
         width_multiplier=m["width_multiplier"], head_channels=m["head_channels"],
+        keypoint_head_arch=arch, detach_keypoint_input=detach,
     ).to(device)
     dataset = KeypointTrainDataset(
         train_samples, augmentation=cfg["augmentation"], input_size=m["input_size"],
@@ -186,7 +215,9 @@ def train_keypoint_model(
         if not torch.isfinite(p).all():
             raise RuntimeError("non-finite weights in {}".format(name))
     return model.eval(), history, {**model.init_report, "amp_skipped_steps": skipped_steps,
-                                 "keypoint_initialization": "pytorch_module_defaults", "keypoint_loss_weight": weight}
+                                 "keypoint_initialization": "pytorch_module_defaults", "keypoint_loss_weight": weight,
+                                 "keypoint_head_arch": arch, "keypoint_detach_input": detach,
+                                 "keypoint_head_parameters": sum(p.numel() for p in model.keypoint_head.parameters())}
 
 
 @torch.no_grad()
