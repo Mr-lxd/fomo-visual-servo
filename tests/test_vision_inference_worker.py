@@ -1402,3 +1402,32 @@ def test_older_models_still_require_threshold_040(identity) -> None:
         InferenceWorker._validate_contract(
             SimpleNamespace(**{**EXPECTED_CONTRACT, **identity, "confidence_threshold": 0.60})
         )
+
+
+BBOX50_IDENTITY = {
+    "artifact_name": "lab_pool_v2_fomo_bbox50_seed42_e250",
+    "checkpoint_epoch": 250,
+    "onnx_sha256": "ec7548b2f7a3149e368f85eb0455983a4245fc10811d35481af7d6b103ba6414",
+    "confidence_threshold": 0.96,
+}
+
+
+def test_contract_whitelist_accepts_bbox50_model_with_its_own_threshold() -> None:
+    InferenceWorker._validate_contract(
+        SimpleNamespace(**{**EXPECTED_CONTRACT, **BBOX50_IDENTITY})
+    )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"confidence_threshold": 0.60},
+        {"confidence_threshold": 0.40},
+        {"checkpoint_epoch": 150},
+    ],
+)
+def test_contract_whitelist_rejects_bbox50_threshold_or_epoch_mismatch(override) -> None:
+    with pytest.raises(ValueError, match="contract mismatch"):
+        InferenceWorker._validate_contract(
+            SimpleNamespace(**{**EXPECTED_CONTRACT, **BBOX50_IDENTITY, **override})
+        )
