@@ -17,7 +17,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-import torch
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,9 +25,8 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "scripts")]
 from run_centernet_cv import _load_cfg  # noqa: E402
 from export_centernet_full import bench  # noqa: E402
 from fomo_servo.centernet.annotations import load_pool_samples  # noqa: E402
-from fomo_servo.centernet.training import _read_rgb, train_model  # noqa: E402
+from fomo_servo.centernet.training import train_model  # noqa: E402
 from fomo_servo.deployment.onnx_export import export_checkpoint_to_onnx  # noqa: E402
-from fomo_servo.geometry.letterbox import letterbox_rgb  # noqa: E402
 from fomo_servo.training.snapshots import sha256_file, write_epoch_snapshot  # noqa: E402
 
 
@@ -144,24 +142,11 @@ def main() -> None:
                                      onnx_path=onnx_path, report_path=sidecar_path)
 
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    model.cpu().eval()
-    worst = 0.0
-    parity = contract["parity"]
-    for sample in samples[:deploy["parity_frames"]]:
-        lb, _ = letterbox_rgb(_read_rgb(sample.image_path), m["input_size"])
-        x = (np.ascontiguousarray(lb.transpose(2, 0, 1), dtype=np.float32) / 255.0)[None]
-        with torch.no_grad():
-            expected = model(torch.from_numpy(x)).numpy()
-        actual = session.run(None, {contract["input"]["name"]: x})[0]
-        np.testing.assert_allclose(actual, expected, rtol=parity["rtol"], atol=parity["atol"])
-        worst = max(worst, float(np.abs(actual - expected).max()))
     x = np.random.default_rng(0).random(tuple(contract["input"]["shape"]), dtype=np.float32)
     timing = bench(session, x, deploy["benchmark"]["warmup"], deploy["benchmark"]["runs"])
     report = {"onnx_sha256": result["onnx_sha256"], "onnx_bytes": onnx_path.stat().st_size,
               "checkpoint_sha256": sha256_file(checkpoint), "checkpoint_bytes": checkpoint.stat().st_size,
-              "parity_passed": True, "parity_frames": deploy["parity_frames"],
-              "parity_images": [s.image_path.name for s in samples[:deploy["parity_frames"]]],
-              "parity_max_abs_diff_16_frames": worst, "parity_rtol": parity["rtol"], "parity_atol": parity["atol"],
+              "parity": result["parity"],
               "ort_cpu_timing_ms": timing, "benchmark": deploy["benchmark"], "ort": ort.__version__}
     (args.out / "export_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2), flush=True)
