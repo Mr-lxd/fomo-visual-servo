@@ -23,6 +23,7 @@ from fomo_servo.models.mobilenet_v2_fomo import MobileNetV2FOMONet
 from fomo_servo.training.engine import initialize_model_weights
 
 from .annotations import PoolSample
+from .bbox_targets import bbox_classification_loss, build_bbox_targets
 from .loss import centernet_loss
 from .model import CenterNetLiteNet, load_fomo_initialisation
 from .targets import VISIBILITIES, Box, build_targets
@@ -41,7 +42,9 @@ class CVTrainDataset(Dataset):
     """Augmented, letterboxed samples with either FOMO or CenterNet-lite targets.
 
     ``kind='fomo'`` uses every box as a target (the existing recipe is unchanged by
-    visibility); ``kind='centernet'`` honours visibility. Both use the same
+    visibility); ``kind='centernet'`` honours visibility. ``fomo_bbox`` and
+    ``fomo_bbox50`` fill intersecting box cells, honour ignore and normalise
+    per-object positive weights. All use the same
     ``AugmentationPipeline`` and per-(seed, epoch, index) RNG as the baseline.
     """
 
@@ -56,13 +59,15 @@ class CVTrainDataset(Dataset):
         num_classes: int,
         seed: int,
         min_overlap: float = 0.7,
+        object_weight: float = 100.0,
     ) -> None:
-        if kind not in {"fomo", "centernet"}:
-            raise ValueError("kind must be 'fomo' or 'centernet'")
+        if kind not in {"fomo", "centernet", "fomo_bbox", "fomo_bbox50"}:
+            raise ValueError("unknown training kind: {}".format(kind))
         self.samples = list(samples)
         self.kind = kind
         self.input_size, self.stride, self.num_classes = input_size, stride, num_classes
         self.seed, self.min_overlap = seed, min_overlap
+        self.object_weight = object_weight
         self.pipeline = AugmentationPipeline(_parse_augmentation_config(dict(augmentation)), is_train=True)
         self.current_epoch = 0
 
@@ -105,6 +110,11 @@ class CVTrainDataset(Dataset):
                 self.input_size, self.stride, self.num_classes, collision_policy="keep_first",
             )
             return {"image": tensor, "target": heatmap.class_index}
+        if self.kind in {"fomo_bbox", "fomo_bbox50"}:
+            return {"image": tensor, **build_bbox_targets(
+                lb_boxes, grid_size=grid, stride=self.stride,
+                central_half=self.kind == "fomo_bbox50", object_weight=self.object_weight,
+            )}
         t = build_targets(
             lb_boxes, grid_size=grid, stride=self.stride, num_classes=self.num_classes,
             min_overlap=self.min_overlap,
@@ -127,7 +137,7 @@ def seed_everything(seed: int) -> None:
 
 def build_model(kind: str, cfg: Mapping[str, Any], init_weights: Path) -> tuple[nn.Module, dict]:
     m = cfg["model"]
-    if kind == "fomo":
+    if kind in {"fomo", "fomo_bbox", "fomo_bbox50"}:
         model = MobileNetV2FOMONet(
             num_classes=m["num_classes"], input_size=m["input_size"],
             width_multiplier=m["width_multiplier"], head_channels=m["head_channels"],
@@ -163,6 +173,7 @@ def train_model(
         train_samples, kind=kind, augmentation=cfg["augmentation"],
         input_size=m["input_size"], stride=m["output_stride"], num_classes=m["num_classes"],
         seed=t["seed"], min_overlap=cfg["centernet_loss"]["gaussian_min_overlap"],
+        object_weight=cfg["fomo_loss"]["object_weight"],
     )
     loader = DataLoader(
         dataset, batch_size=t["batch_size"], shuffle=True,
@@ -196,6 +207,12 @@ def train_model(
             with torch.autocast(device_type=device.type, enabled=use_amp):
                 if kind == "fomo":
                     loss = fomo_loss(model(batch["image"]), batch["target"])
+                    parts = {"loss": float(loss.detach())}
+                elif kind in {"fomo_bbox", "fomo_bbox50"}:
+                    loss = bbox_classification_loss(
+                        model(batch["image"]), batch["target"],
+                        batch["positive_weight"], batch["loss_mask"],
+                    )
                     parts = {"loss": float(loss.detach())}
                 else:
                     raw = model.forward_raw(batch["image"])
