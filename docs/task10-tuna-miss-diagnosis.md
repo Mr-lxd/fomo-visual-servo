@@ -1,4 +1,4 @@
-# Task 10 phase A — tuna miss diagnosis (C complete, A' screen package ready)
+# Task 10 phase A / A' — completed tuna screen-domain diagnosis
 
 Scope: diagnosis only. No training, runtime threshold change, deployment, or phase B.
 
@@ -22,15 +22,15 @@ Of the 32 tuna misses at 0.60, box maximum foreground scores are <0.2 for 17, 0.
 
 True tuna box maxima: median 0.795; reflection tuna (27 boxes) median 0.0216, maximum 0.588. The model suppresses these reflection boxes on held-out images. This comparison cannot establish whether reflection-negative training causally suppresses true tuna, or whether merging tuna into fish is harmful; there is no counterfactual model in phase A.
 
-## Evidence and pending inputs
+## Evidence
 
 Results: `D:\RoboBeetle-results\task10-tuna-miss-2026-10-07\C\` (`recall.csv`, `objects.csv`, `missed_tuna.csv`, `reflection_tuna.csv`, `summary.json`, `provenance.json`, `tuna_scores.png`). Complete per-size/per-source/visibility slices are in `recall.csv`.
 
 Deployment ONNX SHA-256 verified read only: `05acdc7a83264100be6d19ca8ba5641ba7c6448337038bc99f3a74326d225c10`.
 
-Task brief v3 replaces the previous recording/timestamp request with eight numbered screen snapshots. No recording or video timestamps are needed. Current Pi address and capture paths are needed before read-only scp; the latest user-provided address is 192.168.137.86. No Pi connection has been made.
+Task brief v3 replaces the previous recording/timestamp request with eight numbered screen snapshots. No recording or video timestamps are needed. The eight snapshots were retrieved by read-only scp from 192.168.137.86 after the user reported completion. User explicitly reports no real tuna-in-water snapshots.
 
-No analysis unit tests were added or run, per task instructions. Verification is execution on the requested held-out data, exact pooled-metric reproduction, per-object CSV accounting and visual inspection of the histogram. UI change is a separate RoboBeetle draft PR.
+No analysis unit tests were added or run, per task instructions. Verification is execution on the requested held-out data, exact pooled-metric reproduction, per-object CSV accounting and visual inspection of the histogram. UI change is separate RoboBeetle PR #56 (merged on user authorization).
 
 ## Phase A' numbered screen package (v3)
 
@@ -45,3 +45,34 @@ Target scores for 01–08: 0.9800, 0.9551, 0.9904, 0.9869, 0.9254, 0.8343, 0.999
 User procedure: open JPG 01 through 08 full screen in order, aim the USB camera at the display and click Snapshot once per image. No recording and no timestamps. After capture, use read-only scp for the eight snapshots and optional direct-camera real tuna-in-water snapshots; infer with the same model at offline analysis threshold 0.05 and produce paired probability overlays and a score table. No runtime threshold changes, deployment, retraining or phase B.
 
 UI PR #56 was moved to ready and merged with a merge commit on explicit user authorization: `43b6b71e3093447031e243746aa5d76ec4237cb9`. Reviewed head remains `4fdfb63418486ecc4e93da0752fcc44e0d9af843`; its previously completed single Qt regression was 31/31. fomo PR #16 remains draft.
+
+## Phase A' paired-snapshot results
+
+Capture session `capture-20261007-001`, ordered snapshots 1–8, 2026-10-07 15:18:20–15:19:05 Asia/Shanghai. Visual comparison confirms each is the corresponding numbered original. Read-only scp retrieved the service unit to locate capture output, metadata, eight JPEGs, and the configured deployment ONNX/sidecar. ONNX from Pi has SHA-256 `05acdc7a83264100be6d19ca8ba5641ba7c6448337038bc99f3a74326d225c10`, identical to the image-preparation artifact. No SSH commands or Pi writes were issued.
+
+Capture path: `/home/pi/fomo-vision-runtime/datasets_raw/hardware_gate_g_restart/20261007/capture-20261007-001/`. The copied unit points to `artifacts/lab_pool_v2_fomo_seed42_e150.onnx`. Camera metadata: 640x480, YUYV, observed 25 FPS. Unit configuration and file hash identify configured files; no remote process introspection was performed.
+
+Command: `scripts/analyze_tuna_screen_test.py --originals <results>/screen-test --captures <results>/screen-captures --model <results>/screen-captures/lab_pool_v2_fomo_seed42_e150.onnx --report <same>.onnx.json --results <results>/screen-comparison`.
+
+Inference runs once on each unchanged original and full, unchanged camera snapshot using `OnnxRuntimePredictor` and shared RGB/letterbox preprocessing. Diagnostic decoding uses 0.05; detection at the unchanged deployment threshold 0.60 is also reported. SIFT matches (ratio 0.8) and RANSAC homography (4 px) transfer the original target box into the snapshot solely for measuring/reporting that region, not for rectifying inference inputs. All eight projected ROIs and image pairs were visually checked. A homography approximates the visible distortion and is not a lens calibration. Whole-frame maxima are retained separately to avoid confusing another object with tuna.
+
+| ID | Source target | Original class score | Snapshot class score | Target detected @0.60 |
+|---|---|---:|---:|---|
+| 01 | small tuna | 0.9800 | 0.1064 | no |
+| 02 | small tuna | 0.9551 | 0.1168 | no |
+| 03 | medium tuna | 0.9904 | 0.6795 | yes |
+| 04 | medium tuna | 0.9869 | 0.8586 | yes |
+| 05 | large tuna | 0.9254 | 0.5898 | no |
+| 06 | large tuna | 0.8343 | 0.7982 | yes |
+| 07 | jellyfish | 0.99997 | 0.9650 | yes |
+| 08 | fish | 0.99980 | 0.8112 | yes |
+
+The tuna class score is the fish-channel maximum inside the transferred source box, following the fixed class mapping. For 01–05, 07 and 08 it equals the max across foreground classes in that ROI. For 06, all-foreground ROI maximum is 0.9115 (jellyfish) on background near the upper left; visual inspection shows that is not a tuna response. The intended fish response is 0.7982 at the body centre. `comparison.csv` retains both scores, their peak locations, whole-image maxima, hashes and @0.60 detections.
+
+Visual peak positions: 01 near the front body/head region, 02 body middle, 03 rear body, 04 body middle, 05 rear body/dorsal-fin transition, 06 body middle (fish response). These anatomical descriptions are approximate visual observations, not new keypoint labels. Scores 01/02 <0.2 are not rescued at 0.40; 05 lies between 0.40 and 0.60. Three of six intended tuna detections survive photographing the display; both controls survive. All eight correct-class scores fall, but the decrease is much smaller for jellyfish and non-uniform across tuna.
+
+**Judgment: reason 2 is supported, with a threshold effect (reason 1) on image 05.** The identical, known-positive sources produce much lower tuna responses after screen capture. In 01/02 this is severe low-score failure; in 05 the photo response falls just below 0.60. Original image scores are high in all six tuna examples, so these pairs do not support reason 3 as the main explanation. The 06 pair and the prior CV results also contradict a universal large-target failure. Both controls drop somewhat but remain detectable; the experiment does not support "all classes fail on screen" or "all large tuna fail".
+
+These pairs establish a difference for the full screen/camera capture condition. They do not isolate blur, exposure/color, monitor artefacts, perspective, visible geometric distortion or changed effective image scale as separate causes. Real toy-in-water generalization remains untested because the user did not take that optional set. There is no recommendation to change runtime thresholds or train B-box on this evidence.
+
+Outputs: eight `01–08_paired_heatmaps.jpg`, `comparison.csv`, `local_peaks.csv`, `registration.json`, `provenance.json` under `screen-comparison`. Heatmaps use a fixed probability color range 0–1; green outline is the target ROI; all 8-neighbour local foreground maxima >=0.05 are marked with scores. Provenance records Pi ONNX/sidecar, metadata, expected table, script and every image hash. Original target scores reproduce `expected.csv` within 1e-6. Analysis scripts have no unit tests; no product code changed in this phase and no Qt regression was rerun. Phase A/A' is complete; stop for Reviewer, with PR #16 still draft and phase B unstarted.
