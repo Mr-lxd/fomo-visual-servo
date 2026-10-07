@@ -74,7 +74,7 @@ class KeypointTrainDataset(Dataset):
                 return None
             x, y = point
             if metadata.horizontal_flip_applied:
-                x = width - x
+                x = width - 1 - x  # endpoint coordinates are image pixel centres
             x, y = matrix @ np.asarray([x, y, 1.])
             if not (0 <= x < width and 0 <= y < height):
                 return None
