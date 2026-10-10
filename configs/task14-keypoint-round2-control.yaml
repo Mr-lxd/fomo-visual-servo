@@ -1,0 +1,40 @@
+# Task 14 round 2 step 1: control, keypoint loss weight 0, fold 004 only.
+# Everything else (head arch, augmentation, optimiser, epochs) is the round-1 recipe,
+# so the detection path must reproduce task 13 round 2 fold 004.
+data:
+  held_out_sessions:
+  - pool-20260831-004
+  frozen_test_session: pool-20260831-005
+  distance_threshold_px: 81.0
+model:
+  input_size: 192
+  output_stride: 8
+  width_multiplier: 0.35
+  head_channels: 32
+  num_classes: 7
+  init_sha256: e8c242f4af2b87b70fea2a516352f28e70bf438161eeb7d092231ed46c976a1d
+augmentation:
+  enabled: true
+  preset: underwater_conservative
+  overrides: {}
+training:
+  device: cuda
+  amp: true
+  amp_initial_scale: 256.0
+  batch_size: 8
+  seed: 42
+  num_workers: 0
+  optimizer:
+    name: adamw
+    learning_rate: 0.0001
+    weight_decay: 0.0001
+fomo_loss:
+  name: ei_weighted_xent_legacy
+  gamma: 0.0
+  background_weight: 1.0
+  object_weight: 100.0
+keypoint_loss:
+  weight: 0.0
+keypoint_head:
+  arch: linear1x1
+  detach_input: false

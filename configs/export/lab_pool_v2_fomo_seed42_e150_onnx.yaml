@@ -1,0 +1,63 @@
+artifact:
+  name: lab_pool_v2_fomo_seed42_e150
+  source_experiment_config: ../engineering/lab_pool_v2_fomo_seed42_e150.yaml
+  source_experiment_config_sha256: 85a40d5835a3483d6183c3f41b163fc3147fc98f9041394b4308a5c7e7109dda
+  validation_threshold: 0.60
+
+checkpoint:
+  sha256: 952f06403e36e07ee8fc6736c7560a111eb5562e9d021ef1f4405c9533b84a86
+  epoch: 150
+  seed: 42
+  parameter_count: 19208
+  config_fingerprint: fcced0d45b1a8ff5b53f32657874df4c906b48f9d67eb3ed27de5c58dd85c214
+
+model:
+  backbone: mobilenet_v2_fomo
+  width_multiplier: 0.35
+  cut_point: block_6_expand_relu
+  head_channels: 32
+  output_stride: 8
+  classes:
+    - fish
+    - jellyfish
+    - penguin
+    - puffin
+    - shark
+    - starfish
+    - stingray
+  pretrained: false
+  initialization: weights_only_checkpoint
+  initialization_checkpoint_sha256: e8c242f4af2b87b70fea2a516352f28e70bf438161eeb7d092231ed46c976a1d
+  initialization_source_epoch: 40
+  initialization_source_seed: 42
+
+input:
+  name: images
+  shape: [1, 3, 192, 192]
+  dtype: float32
+  color_order: RGB
+  value_range: [0.0, 1.0]
+
+output:
+  name: logits
+  shape: [1, 8, 24, 24]
+  dtype: float32
+  semantic: raw_logits
+
+onnx:
+  opset: 17
+
+parity:
+  seed: 42
+  rtol: 0.0001
+  atol: 0.00001
+
+postprocess:
+  confidence_threshold: 0.60
+  class_thresholds: null
+  component_mode: connected_components
+  confidence_mode: max
+  selection_strategy: highest_confidence
+  max_match_distance_pixels: 32.0
+  max_lost_frames: 5
+  allowed_class_ids: null
