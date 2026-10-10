@@ -16,6 +16,7 @@ import cv2
 from fomo_servo.inference import (
     InferenceError,
     LatestFrameReader,
+    SequentialFrameReader,
     OnnxRuntimePredictor,
     OrtPredictorError,
     OutputPathError,
@@ -56,6 +57,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--display",
         action="store_true",
         help="Show annotated frames in a desktop window; press q or Esc to stop",
+    )
+    parser.add_argument(
+        "--process-every-frame",
+        action="store_true",
+        help=(
+            "Decode an offline video sequentially without dropping frames; "
+            "not valid for numeric live-camera sources"
+        ),
     )
     model_group = parser.add_mutually_exclusive_group(required=True)
     model_group.add_argument("--checkpoint", type=Path)
@@ -174,6 +183,10 @@ def main(arguments: Optional[Sequence[str]] = None) -> int:
             raise InferenceError("--max-frames must be at least 1")
         if args.duration_seconds is not None and args.duration_seconds <= 0.0:
             raise InferenceError("--duration-seconds must be positive")
+        if args.process_every_frame and args.source.isdigit():
+            raise InferenceError(
+                "--process-every-frame applies only to offline video files"
+            )
         protected_inputs = {}
         if not args.source.isdigit():
             protected_inputs["source"] = Path(args.source)
@@ -274,7 +287,10 @@ def main(arguments: Optional[Sequence[str]] = None) -> int:
         with args.output_csv.open("w", newline="", encoding="utf-8") as csv_file, args.output_jsonl.open("w", encoding="utf-8") as jsonl_file:
             csv_writer = csv.DictWriter(csv_file, fieldnames=CSV_COLUMNS)
             csv_writer.writeheader()
-            reader = LatestFrameReader(capture).start()
+            reader_type = (
+                SequentialFrameReader if args.process_every_frame else LatestFrameReader
+            )
+            reader = reader_type(capture).start()
             capture = None
             started_monotonic = time.monotonic()
             while True:

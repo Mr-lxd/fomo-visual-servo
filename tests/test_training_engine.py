@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib
 import json
 from pathlib import Path
@@ -13,6 +14,7 @@ import torch
 
 from fomo_servo.config import load_config
 from fomo_servo.datasets import YOLOv5FOMODataset
+from fomo_servo.models import build_fomo_model
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +37,78 @@ def _engine_api() -> tuple[
         getattr(module, "run_training", None),
         getattr(module, "ensure_finite_gradients", None),
     )
+
+
+def _write_weights_snapshot(path: Path, model: torch.nn.Module) -> str:
+    payload = {
+        "checkpoint_kind": "epoch_snapshot",
+        "weights_only": True,
+        "resumable": False,
+        "epoch": 40,
+        "seed": 42,
+        "model_state": model.state_dict(),
+    }
+    torch.save(payload, path)
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_initialize_model_weights_strictly_loads_snapshot_and_returns_provenance(
+    tmp_path: Path,
+) -> None:
+    from fomo_servo.training import engine
+
+    initializer = getattr(engine, "initialize_model_weights", None)
+    assert callable(initializer), "initialize_model_weights must exist"
+    source_model = torch.nn.Linear(3, 2)
+    with torch.no_grad():
+        source_model.weight.fill_(0.25)
+        source_model.bias.fill_(-0.5)
+    checkpoint = tmp_path / "epoch_040_weights.pt"
+    digest = _write_weights_snapshot(checkpoint, source_model)
+    target_model = torch.nn.Linear(3, 2)
+
+    provenance = initializer(target_model, checkpoint, digest)
+
+    assert torch.equal(target_model.weight, source_model.weight)
+    assert torch.equal(target_model.bias, source_model.bias)
+    assert provenance == {
+        "path": str(checkpoint),
+        "sha256": digest,
+        "checkpoint_kind": "epoch_snapshot",
+        "source_epoch": 40,
+        "source_seed": 42,
+        "strict_missing_keys": [],
+        "strict_unexpected_keys": [],
+    }
+
+
+@pytest.mark.parametrize("failure", ["sha", "schema", "state"])
+def test_initialize_model_weights_rejects_untrusted_or_incompatible_snapshot(
+    tmp_path: Path, failure: str
+) -> None:
+    from fomo_servo.training import TrainingError, engine
+
+    initializer = getattr(engine, "initialize_model_weights", None)
+    assert callable(initializer), "initialize_model_weights must exist"
+    source_model = torch.nn.Linear(3, 2)
+    checkpoint = tmp_path / "epoch_040_weights.pt"
+    digest = _write_weights_snapshot(checkpoint, source_model)
+    target_model = torch.nn.Linear(3 if failure != "state" else 4, 2)
+    if failure == "sha":
+        digest = "0" * 64
+    elif failure == "schema":
+        torch.save({"model_state": source_model.state_dict()}, checkpoint)
+        digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+
+    with pytest.raises(
+        TrainingError,
+        match={
+            "sha": "SHA-256 mismatch",
+            "schema": "weights-only epoch snapshot",
+            "state": "strict model state",
+        }[failure],
+    ):
+        initializer(target_model, checkpoint, digest)
 
 
 def _write_training_config(
@@ -98,6 +172,198 @@ training:
         encoding="utf-8",
     )
     return path
+
+
+def _write_train_only_config(
+    path: Path,
+    output_dir: Path,
+    *,
+    epochs: int,
+    initialize_from: Path | None = None,
+    initialize_sha256: str | None = None,
+    resume: Path | None = None,
+    experiment: bool = False,
+) -> Path:
+    initialization = ""
+    if initialize_from is not None and initialize_sha256 is not None:
+        initialization = (
+            '  initialize_from: "{}"\n'
+            "  initialize_sha256: {}\n"
+        ).format(initialize_from.as_posix(), initialize_sha256)
+    resume_text = "null" if resume is None else '"{}"'.format(resume.as_posix())
+    experiment_yaml = ""
+    if experiment:
+        experiment_yaml = (
+            "\nexperiment:\n"
+            "  name: train_only_smoke\n"
+            '  summary_csv: "{}"\n'.format(
+                (output_dir.parent / "train_only_summary.csv").as_posix()
+            )
+        )
+    path.write_text(
+        """
+dataset:
+  root: "{root}"
+  train_split: train
+  validation_split: null
+  classes: [creature]
+  class_mode: merge_single
+  merged_class_name: creature
+model:
+  backbone: mobilenet_v2_lite
+  width_multiplier: 0.35
+  head_channels: 32
+  input_size: 96
+  output_stride: 8
+  pretrained: false
+loss:
+  name: focal_cross_entropy
+  gamma: 2.0
+  class_weights: [1.0, 3.0]
+postprocess:
+  inference_threshold: 0.40
+evaluation:
+  checkpoint_threshold: 0.40
+  threshold_sweep:
+    enabled: false
+  threshold_calibration:
+    enabled: false
+training:
+  device: cpu
+  amp: false
+  num_workers: 0
+  pin_memory: false
+  batch_size: 2
+  epochs: {epochs}
+  seed: 42
+  output_dir: "{output_dir}"
+  resume: {resume}
+{initialization}  checkpoint_policy: fixed_final_epoch
+  early_stopping_patience: 0
+  epoch_snapshots:
+    enabled: true
+    format: weights_only
+    interval: {epochs}
+    keep_last: 1
+  optimizer:
+    name: adamw
+    learning_rate: 0.0001
+    weight_decay: 0.0001
+  scheduler:
+    name: none
+""".format(
+            root=FIXTURE_ROOT.as_posix(),
+            epochs=epochs,
+            output_dir=output_dir.as_posix(),
+            initialization=initialization,
+            resume=resume_text,
+        ).lstrip()
+        + experiment_yaml,
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_train_only_run_skips_validation_and_persists_fixed_final_epoch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fomo_servo.training import engine
+
+    output_dir = tmp_path / "train-only-output"
+    base_config = load_config(
+        _write_train_only_config(tmp_path / "base.yaml", output_dir, epochs=1)
+    )
+    checkpoint = tmp_path / "epoch_040_weights.pt"
+    digest = _write_weights_snapshot(checkpoint, build_fomo_model(base_config))
+    config = load_config(
+        _write_train_only_config(
+            tmp_path / "train-only.yaml",
+            output_dir,
+            epochs=1,
+            initialize_from=checkpoint,
+            initialize_sha256=digest,
+            experiment=True,
+        )
+    )
+
+    def forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("validation/evaluation must not run in train-only mode")
+
+    monkeypatch.setattr(engine, "validate_one_epoch", forbidden)
+    monkeypatch.setattr(engine, "evaluate_validation_dataset", forbidden)
+    monkeypatch.setattr(engine, "git_commit_sha", lambda _: "a" * 40)
+    monkeypatch.setattr(
+        engine, "git_worktree_fingerprint", lambda _: (False, "b" * 64)
+    )
+
+    summary = engine.run_training(config, device_override="cpu")
+
+    assert summary.start_epoch == 1
+    assert summary.completed_epochs == 1
+    assert summary.best_val_f1 is None
+    assert summary.best_grid_f1 is None
+    assert summary.best_centroid_f1 is None
+    assert summary.best_epoch is None
+    assert summary.final_train_loss > 0.0
+    assert summary.checkpoint_policy == "fixed_final_epoch"
+    assert summary.initialization["sha256"] == digest
+    assert (output_dir / "last.pt").is_file()
+    assert (output_dir / "epoch_snapshots/epoch_001_weights.pt").is_file()
+    assert not (output_dir / "best_val_f1.pt").exists()
+    assert not (output_dir / "best_grid_f1.pt").exists()
+    assert not (output_dir / "best_centroid_f1.pt").exists()
+    with (output_dir / "history.csv").open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 1
+    assert rows[0]["train_loss"]
+    assert rows[0]["val_loss"] == ""
+    assert rows[0]["grid_f1"] == ""
+    last = torch.load(output_dir / "last.pt", map_location="cpu", weights_only=False)
+    assert last["checkpoint_policy"] == "fixed_final_epoch"
+    assert last["selection_metric"] == "fixed_final_epoch"
+    assert last["best_val_f1"] is None
+    assert last["grid_f1"] is None
+    assert last["initialization"]["sha256"] == digest
+    persisted = json.loads(
+        (output_dir / "training_summary.json").read_text(encoding="utf-8")
+    )
+    assert persisted["best_val_f1"] is None
+    assert persisted["final_train_loss"] == pytest.approx(summary.final_train_loss)
+    assert persisted["initialization"]["source_epoch"] == 40
+    metadata = json.loads(
+        (output_dir / "experiment_metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["checkpoint_policy"] == "fixed_final_epoch"
+    assert metadata["validation_split"] is None
+
+
+def test_train_only_last_checkpoint_resumes_without_fabricated_metrics(
+    tmp_path: Path,
+) -> None:
+    from fomo_servo.training import engine
+
+    output_dir = tmp_path / "train-only-resume"
+    first = load_config(
+        _write_train_only_config(tmp_path / "first.yaml", output_dir, epochs=1)
+    )
+    engine.run_training(first, device_override="cpu")
+    second = load_config(
+        _write_train_only_config(
+            tmp_path / "second.yaml",
+            output_dir,
+            epochs=2,
+            resume=output_dir / "last.pt",
+        )
+    )
+
+    summary = engine.run_training(second, device_override="cpu")
+
+    assert summary.start_epoch == 2
+    assert summary.completed_epochs == 2
+    assert summary.best_val_f1 is None
+    with (output_dir / "history.csv").open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert [int(row["epoch"]) for row in rows] == [1, 2]
 
 
 def test_epoch_snapshot_interval_writes_weights_only_without_changing_legacy_checkpoints(

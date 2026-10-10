@@ -11,7 +11,7 @@ Usage::
 
     python run.py <entry> [arguments...]
 
-Entries: predict_image, predict_video, vision_live.
+Entries: predict_image, predict_video, vision_live, capture_dataset.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ ENTRY_POINTS = {
     "predict_image": "scripts.predict_image",
     "predict_video": "scripts.predict_video",
     "vision_live": "scripts.vision_live",
+    "capture_dataset": "scripts.capture_dataset",
 }
 
 USAGE = (
