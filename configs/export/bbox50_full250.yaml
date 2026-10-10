@@ -1,0 +1,8 @@
+# Task 15 deployment settings; training recipe is passed separately unchanged.
+artifact_name: lab_pool_v2_fomo_bbox50_seed42_e250
+epochs: 250
+confidence_threshold: 0.96
+train_images: 213
+benchmark: {warmup: 50, runs: 500}
+source_template: ../engineering/lab_pool_v2_fomo_seed42_e150.yaml
+export_template: lab_pool_v2_fomo_seed42_e150_onnx.yaml
