@@ -25,7 +25,7 @@ FRAME_FIELDS = [
     "frame_id", "capture_ts_ns", "sampling", "image_file", "gyro_x",
     "gyro_y", "gyro_z", "roll", "pitch", "gait_phase", "backend",
     "active_mode", "target_mode", "motion_state", "depth_cal_m",
-    "depth_age_ms", "nearest_imu_dt_ms",
+    "depth_age_ms", "depth_match_dt_ms", "nearest_imu_dt_ms",
 ]
 COUNTERS = ["sampler_drop_total", "gateway_drop_total", "batch_gap_total",
             "fragment_gap_total"]
@@ -54,19 +54,25 @@ def distribution(values: np.ndarray) -> dict | None:
 
 
 def fit_clock(rows: list[dict], window_ms: float = 1000.0) -> tuple[np.ndarray, dict]:
-    """Fit pi_ms=a*mcu_ms+b from one minimum-delay sample per time window.
+    """Fit batch transmit/receive clocks, then map unwrapped sample times.
 
-    Each receive batch may contain older samples. Select minima of y-a*x,
-    not minima of y alone, so sample age/drift do not bias the window picks.
+    Deduplicate batch_seq and select minima of pi_rx_ms-a*mcu_tx_ms,
+    so older samples queued within a batch do not bias the window picks.
     Refine the picks three times, then anchor the intercept at the global
     minimum receive offset. Receive delay statistics are not sensor accuracy.
     """
-    x = np.array([float(row["mcu_unwrapped_ms"]) for row in rows])
-    y = np.array([float(row["pi_rx_ms"]) for row in rows])
-    if len(x) < 3 or np.any(np.diff(x) <= 0):
+    sample_x = np.array([float(row["mcu_unwrapped_ms"]) for row in rows])
+    if len(sample_x) < 3 or np.any(np.diff(sample_x) <= 0):
         raise ValueError("need at least three ordered, distinct MCU sample times")
     if len({row["link_epoch"] for row in rows}) != 1:
         raise ValueError("one package must contain a single link_epoch/clock mapping")
+    batches = {}
+    for row in rows:
+        batches.setdefault(row["batch_seq"], row)
+    x = np.array([float(row["mcu_tx_ms"]) for row in batches.values()])
+    y = np.array([float(row["pi_rx_ms"]) for row in batches.values()])
+    if len(x) < 3 or np.any(np.diff(x) <= 0):
+        raise ValueError("need at least three ordered, distinct MCU batch transmit times")
     bins = np.floor((x - x[0]) / window_ms).astype(int)
     a = (y[-1] - y[0]) / (x[-1] - x[0])
     for _ in range(3):
@@ -81,16 +87,19 @@ def fit_clock(rows: list[dict], window_ms: float = 1000.0) -> tuple[np.ndarray, 
     if a <= 0:
         raise ValueError("clock fit has a nonpositive slope")
     b = float(np.min(y - a * x))
-    pi = a * x + b
+    batch_pi = a * x + b
+    pi = a * sample_x + b
     online = np.array([float(row["sample_pi_ms"]) if row["sample_pi_ms"] else np.nan
                        for row in rows])
     difference = pi - online
     return pi, {
         "method": "iterated_window_minimum_offset_then_lower_intercept",
+        "fit_equation": "pi_rx_ms = a * mcu_tx_ms + b + receive_delay_ms",
+        "deduplication": "batch_seq", "batches": len(batches),
         "equation": "pi_ms = a * mcu_unwrapped_ms + b", "a": a, "b_ms": b,
         "window_ms": window_ms, "iterations": 3, "envelope_points": len(selected),
-        "envelope_residual_ms": distribution(y[selected] - pi[selected]),
-        "all_receive_residual_ms": distribution(y - pi),
+        "envelope_residual_ms": distribution(y[selected] - batch_pi[selected]),
+        "all_receive_residual_ms": distribution(y - batch_pi),
         "offline_minus_sample_pi_ms": distribution(difference[np.isfinite(difference)]),
         "pi_range_ms": [float(pi[0]), float(pi[-1])],
         "limitation": "lower receive envelope still includes minimum transport/sensor latency",
@@ -262,9 +271,13 @@ def build(args: argparse.Namespace) -> dict:
             record.update(interpolate_motion(timestamp / 1e6, samples, pi))
             depth = by_id.get(frame_id)
             if depth is None and len(depth_times):
-                depth = timed_visual[int(np.argmin(np.abs(depth_times - timestamp)))]
+                nearest = int(np.argmin(np.abs(depth_times - timestamp)))
+                if abs(int(depth_times[nearest]) - timestamp) <= 100_000_000:
+                    depth = timed_visual[nearest]
             if depth:
                 record.update(depth_cal_m=depth["depth_cal_m"], depth_age_ms=depth["depth_age_ms"])
+                if depth["capture_ts_ns"]:
+                    record["depth_match_dt_ms"] = abs(int(depth["capture_ts_ns"]) - timestamp) / 1e6
             frames.append(record)
         inputs["frame_index_csv"] = input_info(index_path)
         for segment in dict.fromkeys(row["segment"] for row in index):
@@ -286,7 +299,7 @@ def build(args: argparse.Namespace) -> dict:
                        "imu_within_50ms_frames": covered,
                        "imu_within_50ms_fraction": covered / len(index),
                        "sampled_depth_coverage_fraction": sum(bool(row["depth_cal_m"]) for row in frames) / len(frames),
-                       "depth_join": "same frame_id, otherwise nearest capture_ts_ns"}
+                       "depth_join": "same frame_id, otherwise nearest capture_ts_ns within 100 ms"}
     metadata = raw / "metadata.json"
     if metadata.exists():
         inputs["capture_metadata"] = input_info(metadata)
@@ -313,7 +326,8 @@ def build(args: argparse.Namespace) -> dict:
               "clock_fit": fit, "quality": {"motion": motion_stats, "frames": frame_stats},
               "units": {"capture_ts_ns": "Pi CLOCK_MONOTONIC ns", "offline_pi_ms": "Pi CLOCK_MONOTONIC ms",
                         "gyro_xyz": "deg/s", "roll_pitch": "deg", "gait_phase": "rad [0,2*pi)",
-                        "depth_cal_m": "m", "depth_age_ms": "ms", "nearest_imu_dt_ms": "absolute ms"}}
+                        "depth_cal_m": "m", "depth_age_ms": "ms", "depth_match_dt_ms": "absolute ms",
+                        "nearest_imu_dt_ms": "absolute ms"}}
     (output / "session.json").write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return result
 

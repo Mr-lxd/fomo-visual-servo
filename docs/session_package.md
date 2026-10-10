@@ -16,10 +16,10 @@ raw 目录包含 `frame_index.csv`、它列出的 AVI 分段、一个 `motion*.c
 
 - 默认 `--stride 12`，按索引位置从第 0 帧均匀抽帧；`--keyframes 123 456` 补帧，重合帧也标为 `keyframe`。逐帧解码所有分段，核对每段索引数与实际可解码帧数，没有模型选帧或 overlay。
 - `--only motion` / `--only video` 分别用于阶段 A 组件验证。`--dev-sample` 允许未登记的开发样本，`registration=null`，不把它补写进登记表；这不是生产数据的登记方式。
-- MCU→Pi 时钟：默认 `--fit-window-ms 1000`。从每窗选择 `pi_rx_ms-a*mcu_unwrapped_ms` 最小的样本，对这些下包络点拟合斜率，迭代三轮；最终截距取全局最小接收偏移。这个截距仍含最小传输/传感器延迟，不能当独立同步真值。原始 CSV 最后的计数器行不参与拟合，但保留在 `imu.csv`。
+- MCU→Pi 时钟：默认 `--fit-window-ms 1000`。先按 `batch_seq` 去重，以批次 `mcu_tx_ms` 对 `pi_rx_ms` 拟合；每窗选择 `pi_rx_ms-a*mcu_tx_ms` 最小的批次，对这些下包络点拟合斜率，迭代三轮，最终截距取全部批次的最小接收偏移。再把 a、b 应用于样本的 `mcu_unwrapped_ms`，得到 `offline_pi_ms`，避免把批内样本排队时间混入拟合。批次发送时间须递增，当前不展开跨 32 位回绕的发送时间。这个截距仍含最小传输/传感器延迟，不能当独立同步真值。原始 CSV 最后的计数器行不参与拟合，但保留在 `imu.csv`。
 - 输出 `frames/` JPEG、`frames.csv`、`imu.csv`、`session.json`。`imu.csv` 保留全部原始行，加 `offline_pi_ms`；计数器行该列为空。
-- `frames.csv` 列：`frame_id,capture_ts_ns,sampling,image_file,gyro_x,gyro_y,gyro_z,roll,pitch,gait_phase,backend,active_mode,target_mode,motion_state,depth_cal_m,depth_age_ms,nearest_imu_dt_ms`。gyro 为 deg/s，roll/pitch 为 deg。原 motion CSV 的 `gait_phase` 实为 `[0,2π)` 弧度（u16×2π/65536）；内部转为 turns 处理 1→0 回绕，再转回弧度，保持单位。有效标记必须在两侧都为 1；范围外不外推，列留空。状态取帧时刻之前最近的样本。
-- 深度优先同 `frame_id`，否则在有深度值的 visual 行中选择最近 `capture_ts_ns`。`depth_age_ms` 保留原 visual 值；没有 depth 行则留空。近邻匹配不代表深度新鲜，使用时仍需检查 age。
+- `frames.csv` 列：`frame_id,capture_ts_ns,sampling,image_file,gyro_x,gyro_y,gyro_z,roll,pitch,gait_phase,backend,active_mode,target_mode,motion_state,depth_cal_m,depth_age_ms,depth_match_dt_ms,nearest_imu_dt_ms`。gyro 为 deg/s，roll/pitch 为 deg。原 motion CSV 的 `gait_phase` 实为 `[0,2π)` 弧度（u16×2π/65536）；内部转为 turns 处理 1→0 回绕，再转回弧度，保持单位。有效标记必须在两侧都为 1；范围外不外推，列留空。状态取帧时刻之前最近的样本。
+- 深度优先同 `frame_id`，否则在有深度值的 visual 行中选择最近 `capture_ts_ns`，仅接受绝对时间差 ≤100 ms，超出则深度相关列留空。`depth_age_ms` 保留原 visual 值；`depth_match_dt_ms` 记录已接受匹配的绝对时间差（ms），同 ID 行缺时间戳时该列留空；没有 depth 行则留空。近邻匹配不代表深度新鲜，使用时仍需检查 age。
 - `session.json` 记录登记行、每个输入的路径/SHA-256、拟合参数/残差/相对在线映射差异、frame_id 跳号和缺帧数、全部视频帧 50 ms 内 IMU 覆盖率、抽样帧深度覆盖率、计数器起止和增量。计数器起值可能是录制前累计，不能把起值叫作本次会话丢片数。还记录 Forward 相位回绕插值所得 Pi 时钟周期。
 
 帧 ID 跳号只能统计首末已记录帧之间的缺口；首帧前和末帧后的相机丢帧无法从此索引推断。`nearest_imu_dt_ms` 为绝对时间差。
