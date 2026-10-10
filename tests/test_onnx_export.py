@@ -202,6 +202,65 @@ def _write_export_config(path: Path, checkpoint: Path, **overrides: object) -> P
     return path
 
 
+def _write_adaptation_export_config(path: Path, checkpoint: Path) -> Path:
+    initialization_sha = "e" * 64
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    metadata = payload["model_metadata"]
+    metadata["pretrained"] = False
+    metadata["initialization"] = "weights_only_checkpoint"
+    metadata.pop("pretrained_load_report")
+    metadata["initialization_checkpoint_sha256"] = initialization_sha
+    metadata["initialization_source_epoch"] = 40
+    metadata["initialization_source_seed"] = 42
+    torch.save(payload, checkpoint)
+    _write_export_config(path, checkpoint)
+    export_payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    source_path = path.parent / export_payload["artifact"]["source_experiment_config"]
+    source_payload = yaml.safe_load(source_path.read_text(encoding="utf-8"))
+    source_payload["model"]["pretrained"] = False
+    source_payload["model"].pop("pretrained_sha256")
+    source_payload["training"]["initialize_sha256"] = initialization_sha
+    source_path.write_text(
+        yaml.safe_dump(source_payload, sort_keys=False), encoding="utf-8"
+    )
+    export_payload["artifact"]["source_experiment_config_sha256"] = _sha256(
+        source_path
+    )
+    export_payload["checkpoint"]["sha256"] = _sha256(checkpoint)
+    export_payload["checkpoint"]["epoch"] = payload["epoch"]
+    export_payload["model"]["pretrained"] = False
+    export_payload["model"]["initialization"] = "weights_only_checkpoint"
+    export_payload["model"].pop("pretrained_sha256")
+    export_payload["model"]["initialization_checkpoint_sha256"] = initialization_sha
+    export_payload["model"]["initialization_source_epoch"] = 40
+    export_payload["model"]["initialization_source_seed"] = 42
+    path.write_text(yaml.safe_dump(export_payload, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def test_adaptation_checkpoint_accepts_strict_weights_initialization_provenance(
+    tmp_path: Path,
+) -> None:
+    from fomo_servo.deployment.onnx_export import (
+        load_checkpoint_model,
+        load_export_contract,
+    )
+
+    checkpoint = _write_checkpoint(tmp_path / "epoch_020_weights.pt", epoch=20)
+    config = _write_adaptation_export_config(tmp_path / "adaptation.yaml", checkpoint)
+
+    contract = load_export_contract(config)
+    model, provenance = load_checkpoint_model(contract, checkpoint)
+
+    assert contract.pretrained is False
+    assert contract.initialization == "weights_only_checkpoint"
+    assert contract.initialization_checkpoint_sha256 == "e" * 64
+    assert contract.initialization_source_epoch == 40
+    assert contract.initialization_source_seed == 42
+    assert model.training is False
+    assert provenance["epoch"] == 20
+
+
 def test_load_formal_checkpoint_validates_metadata_and_state_dict(tmp_path: Path) -> None:
     from fomo_servo.deployment.onnx_export import (
         load_checkpoint_model,

@@ -29,7 +29,7 @@ class DatasetConfig:
 
     root: Path
     train_split: str
-    validation_split: str
+    validation_split: Optional[str]
     class_names: Tuple[str, ...]
     class_mode: str
     merged_class_name: str
@@ -75,6 +75,9 @@ class TrainingConfig:
     seed: int = 42
     output_dir: Path = Path("outputs/fomo")
     resume: Optional[Path] = None
+    initialize_from: Optional[Path] = None
+    initialize_sha256: Optional[str] = None
+    checkpoint_policy: str = "validation_best"
     early_stopping_patience: int = 0
     early_stopping_min_delta: float = 0.0
     checkpoint_criterion: str = "grid_f1"
@@ -364,7 +367,7 @@ def load_config(path: ConfigPath) -> ProjectConfig:
 
     root = _required_path(dataset_mapping, "root", "dataset")
     train_split = _optional_text(dataset_mapping, "train_split", "train", "dataset")
-    validation_split = _optional_text(
+    validation_split = _optional_nullable_text(
         dataset_mapping, "validation_split", "val", "dataset"
     )
     class_names = _required_class_names(dataset_mapping)
@@ -661,7 +664,7 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     selection_split = _optional_text(
         selection_mapping,
         "split",
-        validation_split,
+        validation_split or "val",
         "evaluation.checkpoint_selection",
     )
     selection_grid_mapping = selection_mapping.get("threshold_grid")
@@ -761,6 +764,40 @@ def load_config(path: ConfigPath) -> ProjectConfig:
         training_mapping, "output_dir", "outputs/fomo", "training"
     )
     resume = _optional_nullable_path(training_mapping, "resume", "training")
+    initialize_from = _optional_nullable_path(
+        training_mapping, "initialize_from", "training"
+    )
+    initialize_sha256 = _optional_nullable_text(
+        training_mapping, "initialize_sha256", None, "training"
+    )
+    if initialize_sha256 is not None and not re.fullmatch(
+        r"[0-9a-fA-F]{64}", initialize_sha256
+    ):
+        raise ConfigurationError(
+            "training.initialize_sha256 must be a 64-character hexadecimal SHA-256 string"
+        )
+    if (initialize_from is None) != (initialize_sha256 is None):
+        raise ConfigurationError(
+            "training.initialize_from and training.initialize_sha256 must be provided together"
+        )
+    if initialize_from is not None and resume is not None:
+        raise ConfigurationError(
+            "training.initialize_from and training.resume are mutually exclusive"
+        )
+    if initialize_from is not None and pretrained:
+        raise ConfigurationError(
+            "training.initialize_from requires model.pretrained=false"
+        )
+    checkpoint_policy = _optional_text(
+        training_mapping,
+        "checkpoint_policy",
+        "validation_best",
+        "training",
+    )
+    if checkpoint_policy not in {"validation_best", "fixed_final_epoch"}:
+        raise ConfigurationError(
+            "training.checkpoint_policy must be 'validation_best' or 'fixed_final_epoch'"
+        )
     early_stopping_patience = _optional_nonnegative_integer(
         training_mapping, "early_stopping_patience", 0, "training"
     )
@@ -817,6 +854,21 @@ def load_config(path: ConfigPath) -> ProjectConfig:
     scheduler_gamma = _optional_positive_float(
         scheduler_mapping, "gamma", 1.0, "training.scheduler"
     )
+    if validation_split is None:
+        if checkpoint_policy != "fixed_final_epoch":
+            raise ConfigurationError(
+                "train-only mode requires training.checkpoint_policy='fixed_final_epoch'"
+            )
+        if early_stopping_patience != 0:
+            raise ConfigurationError("train-only mode does not support early stopping")
+        if threshold_sweep_enabled:
+            raise ConfigurationError(
+                "train-only mode requires evaluation.threshold_sweep.enabled=false"
+            )
+        if calibration_enabled:
+            raise ConfigurationError(
+                "train-only mode requires evaluation.threshold_calibration.enabled=false"
+            )
 
     return ProjectConfig(
         dataset=DatasetConfig(
@@ -862,6 +914,11 @@ def load_config(path: ConfigPath) -> ProjectConfig:
             seed=seed,
             output_dir=output_dir,
             resume=resume,
+            initialize_from=initialize_from,
+            initialize_sha256=(
+                initialize_sha256.lower() if initialize_sha256 is not None else None
+            ),
+            checkpoint_policy=checkpoint_policy,
             early_stopping_patience=early_stopping_patience,
             early_stopping_min_delta=early_stopping_min_delta,
             checkpoint_criterion=checkpoint_criterion,

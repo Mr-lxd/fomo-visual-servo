@@ -105,3 +105,47 @@ def test_train_cli_reports_missing_config_file() -> None:
 
     assert result.returncode == 1
     assert "Unable to read configuration" in result.stderr
+
+
+def test_train_cli_reports_train_only_final_epoch_without_best_metric(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "train-only-cli"
+    config_path = _write_config(tmp_path / "train-only.yaml", output_dir)
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace("  classes: [creature]\n", "  validation_split: null\n  classes: [creature]\n")
+    text = text.replace("  epochs: 2\n", "  epochs: 1\n")
+    text = text.replace(
+        "  resume: null\n",
+        "  resume: null\n  checkpoint_policy: fixed_final_epoch\n",
+    )
+    text += (
+        "\nevaluation:\n"
+        "  checkpoint_threshold: 0.40\n"
+        "  threshold_sweep:\n"
+        "    enabled: false\n"
+        "  threshold_calibration:\n"
+        "    enabled: false\n"
+    )
+    config_path.write_text(text, encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/train.py",
+            "--config",
+            str(config_path),
+            "--device",
+            "cpu",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Checkpoint policy: fixed_final_epoch" in result.stdout
+    assert "Final train loss:" in result.stdout
+    assert "Best validation" not in result.stdout
+    assert "Best checkpoint" not in result.stdout

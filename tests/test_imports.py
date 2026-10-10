@@ -14,6 +14,7 @@ PACKAGE_MODULES = (
     "fomo_servo.config",
     "fomo_servo.datasets",
     "fomo_servo.datasets.augmentation",
+    "fomo_servo.capture",
     "fomo_servo.models",
     "fomo_servo.training",
     "fomo_servo.losses",
@@ -94,9 +95,52 @@ def test_onnx_cli_modules_import_without_torch() -> None:
             (
                 "import sys; sys.modules['torch'] = None; "
                 "import scripts.predict_image; import scripts.predict_video; "
-                "import scripts.select_smoke_test_assets"
+                "import scripts.select_smoke_test_assets; "
+                "import scripts.capture_dataset; "
+                "import fomo_servo.capture"
             ),
         ],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_capture_import_does_not_probe_model_or_onnx_dependencies() -> None:
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (str(root), str(root / "src"))
+    )
+    script = "\n".join(
+        (
+            "import sys",
+            "probed = []",
+            "class _BlockedDependencyFinder:",
+            "    def find_spec(self, fullname, path=None, target=None):",
+            "        roots = ('torch', 'onnx', 'onnxruntime')",
+            "        if any(fullname == root or fullname.startswith(root + '.') for root in roots):",
+            "            probed.append(fullname)",
+            "            raise ImportError('forbidden capture dependency probe: ' + fullname)",
+            "        return None",
+            "sys.meta_path.insert(0, _BlockedDependencyFinder())",
+            "import scripts.capture_dataset",
+            "import fomo_servo.capture",
+            "forbidden = [name for name in sys.modules if name.startswith((",
+            "    'fomo_servo.models', 'fomo_servo.inference',",
+            "    'fomo_servo.deployment', 'fomo_servo.export'))]",
+            "assert not probed, repr(probed)",
+            "assert not forbidden, repr(forbidden)",
+            "print('ok')",
+        )
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
         cwd=root,
         env=environment,
         capture_output=True,

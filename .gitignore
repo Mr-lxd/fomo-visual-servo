@@ -43,6 +43,8 @@ dist/
 # Local datasets and exported media
 /data/
 /datasets/
+/datasets_raw/
+/datasets_processed/
 /predictions/
 /benchmarks/
 /smoke_media/

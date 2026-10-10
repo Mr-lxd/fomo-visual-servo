@@ -1,0 +1,45 @@
+# Task 14 round 3 (final): KP-joint-0.1, four folds, 250 epochs.
+# Same keypoint branch as round 2 (3x3 conv 32 -> 32 + ReLU + 1x1 conv -> 4) but
+# WITHOUT detach, so the branch gradient does reach the shared detection
+# features; the keypoint loss weight is 0.1 instead of 1.0. Everything else
+# (detection recipe, augmentation, optimiser, epochs, snapshots) is unchanged.
+data:
+  held_out_sessions:
+  - pool-20260831-001
+  - pool-20260831-002
+  - pool-20260831-003
+  - pool-20260831-004
+  frozen_test_session: pool-20260831-005
+  distance_threshold_px: 81.0
+model:
+  input_size: 192
+  output_stride: 8
+  width_multiplier: 0.35
+  head_channels: 32
+  num_classes: 7
+  init_sha256: e8c242f4af2b87b70fea2a516352f28e70bf438161eeb7d092231ed46c976a1d
+augmentation:
+  enabled: true
+  preset: underwater_conservative
+  overrides: {}
+training:
+  device: cuda
+  amp: true
+  amp_initial_scale: 256.0
+  batch_size: 8
+  seed: 42
+  num_workers: 0
+  optimizer:
+    name: adamw
+    learning_rate: 0.0001
+    weight_decay: 0.0001
+fomo_loss:
+  name: ei_weighted_xent_legacy
+  gamma: 0.0
+  background_weight: 1.0
+  object_weight: 100.0
+keypoint_loss:
+  weight: 0.1
+keypoint_head:
+  arch: conv3x3_relu_conv1x1
+  detach_input: false

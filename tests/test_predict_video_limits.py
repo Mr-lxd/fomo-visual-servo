@@ -186,6 +186,30 @@ def test_without_limits_processes_until_source_ends(tmp_path: Path) -> None:
     assert len(jsonl_lines) == len(rows)
 
 
+def test_process_every_frame_preserves_complete_offline_video_sequence(
+    tmp_path: Path,
+) -> None:
+    """Offline validation mode must emit one telemetry row per source frame."""
+
+    from scripts.predict_video import main
+
+    onnx_path, report_path, _model = _write_model_and_report(tmp_path)
+    _write_input_video(tmp_path / "input.avi", frame_count=6)
+    arguments = _base_arguments(
+        tmp_path, onnx_path, report_path, str(tmp_path / "input.avi")
+    ) + ["--process-every-frame"]
+
+    exit_code = main(arguments)
+
+    assert exit_code == 0
+    rows = _csv_rows(tmp_path / "out" / "prediction.csv")
+    assert [int(row["frame_index"]) for row in rows] == list(range(6))
+    jsonl_lines = (tmp_path / "out" / "prediction.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert len(jsonl_lines) == 6
+
+
 def test_max_frames_must_be_positive(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
