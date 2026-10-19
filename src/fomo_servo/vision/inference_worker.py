@@ -68,6 +68,11 @@ _SHARED_CONTRACT = {
 # the earlier lab-pool model and the original D2 epoch-40 model are kept for rollback.
 # Each model carries its own detection threshold (chosen by cross-validation).
 _MODEL_IDENTITIES = {
+    "0f7c805f873c9bb19a8835f798e3e4f3b64f32caa39ce70dcd62046140b7c3e1": {
+        "artifact_name": "lab_pool_v3_fomo_bbox50_seed42_e250",
+        "checkpoint_epoch": 250,
+        "confidence_threshold": 0.96,
+    },
     "ec7548b2f7a3149e368f85eb0455983a4245fc10811d35481af7d6b103ba6414": {
         "artifact_name": "lab_pool_v2_fomo_bbox50_seed42_e250",
         "checkpoint_epoch": 250,
